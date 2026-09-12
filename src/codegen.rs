@@ -2181,26 +2181,6 @@ mod tests {
     }
 
     #[test]
-    fn test_weight_parsed() {
-        let src = r#"
-OnRandomTalk @3 => {
-    湊: 重いトーク。
-}
-OnRandomTalk @1 => {
-    湊: 軽いトーク。
-}
-OnRandomTalk => {
-    湊: 重みなしトーク。
-}
-"#;
-        let talks = parse_talks(src);
-        assert_eq!(talks.len(), 3);
-        assert_eq!(talks[0].weight, Some(3));
-        assert_eq!(talks[1].weight, Some(1));
-        assert_eq!(talks[2].weight, None);
-    }
-
-    #[test]
     fn test_empty_map() {
         let src = r#"OnBoot => {
     let d = {}

@@ -726,9 +726,7 @@ static RNG_STATE: AtomicU32 = AtomicU32::new(0);
 
 /// SplitMix32。
 /// 以前はxorshift32を使っていたが、下位ビットの質が悪く、
-/// pick_weightedの `% total`（小さな法）で強い周期性が出ていた。
-/// 「@3と@1が交互に出る」「同じ重みの中で1件だけ繰り返し選ばれる」
-/// といった偏りの原因になっていたため置き換えた。
+/// 小さな法での剰余演算で強い周期性・偏りが出ていたため置き換えた。
 pub fn next_rand() -> u32 {
     let mut x = RNG_STATE.load(Ordering::Relaxed);
     if x == 0 {

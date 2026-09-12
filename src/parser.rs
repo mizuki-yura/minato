@@ -84,15 +84,7 @@ pub enum MatchPattern {
 #[derive(Debug, Clone)]
 pub struct Talk {
     pub event: String,
-    ///トーク選択時の重み。構文としては解析されるが
-    ///TalkSelectorでは現在これを使用せず、全候補を均等に扱ったうえで
-    ///一周保障（全候補が出そろうまで同じものは選ばない）を行っている。
-    ///重みは数学的な制約が生じるため、実際のトークには使用しない。
-    ///現状は単純さを優先した。将来重みが必要に立った時のために
-    /// 構文・フィールドとしては残してあります。
-    #[allow(dead_code)]
-    pub weight: Option<u32>,
-    pub cond: Option<Expr>,  
+    pub cond: Option<Expr>,
     pub body: Vec<Stmt>,
 }
 
@@ -923,17 +915,6 @@ pub fn talk<'a>() -> impl Parser<'a, &'a str, Talk, extra::Err<Rich<'a, char>>> 
                 .then_ignore(ws_nl())
                 .or_not()
         )
-        // @重み をオプションで受け取る
-        .then(
-            just('@')
-                .ignore_then(
-                    text::int(10)
-                        .map(|s: &str| s.parse::<u32>().unwrap())
-                        .labelled("@の後に重み（整数）が必要です")
-                )
-                .then_ignore(ws_nl())
-                .or_not()
-        )
         .then_ignore(just("=>").labelled("イベント名の後に「=>」が必要です"))
         .then_ignore(ws_nl())
         .then(
@@ -949,7 +930,7 @@ pub fn talk<'a>() -> impl Parser<'a, &'a str, Talk, extra::Err<Rich<'a, char>>> 
                 .then_ignore(just('}').labelled("トーク定義は「}」で閉じてください"))
                 .then_ignore(ws_nl())
         )
-        .map(|(((event, cond), weight), body)| Talk { event, cond, weight, body })
+        .map(|((event, cond), body)| Talk { event, cond, body })
 }
 // ── preprocess（変更なし）────────────────────────────────
 

@@ -30,7 +30,6 @@ md# 湊ドキュメント
   - [ビルトイン関数](func/builtin.md)
   - [format関数](func/format.md)
 - [トーク制御](talk/index.md)
-  - [重み（@）](talk/weight.md)
   - [条件フィルタ](talk/cond.md)
   - [ランダムトークの仕組み](talk/random.md)
   - [now・referenceの使い方](talk/now.md)

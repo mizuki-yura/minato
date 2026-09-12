@@ -96,8 +96,8 @@ pub fn simple_rand() -> u32 {
 mod tests {
     use super::*;
 
-    fn dummy_talk(event: &str, weight: Option<u32>) -> Talk {
-        Talk { event: event.to_string(), weight, cond: None, body: vec![] }
+    fn dummy_talk(event: &str) -> Talk {
+        Talk { event: event.to_string(), cond: None, body: vec![] }
     }
 
     fn as_alive(talks: &[Talk]) -> Vec<(usize, &Talk)> {
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_single_candidate() {
-        let candidates = vec![dummy_talk("OnBoot", None)];
+        let candidates = vec![dummy_talk("OnBoot")];
         let alive = as_alive(&candidates);
         let mut sel = TalkSelector::new();
         for _ in 0..5 {
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_never_repeats_immediately() {
-        let candidates: Vec<Talk> = (0..5).map(|_| dummy_talk("OnRandomTalk", None)).collect();
+        let candidates: Vec<Talk> = (0..5).map(|_| dummy_talk("OnRandomTalk")).collect();
         let alive: Vec<(usize, &Talk)> = as_alive(&candidates);
         let mut sel = TalkSelector::new();
 
@@ -137,7 +137,7 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
     // 「1件だった時に選ばれたトーク」が直後に再び選ばれないこと。
     // 修正前は built_from が復帰後の集合と一致するため rebuild されず、
     // 残っていた queue から同じIDがpopされて隣接重複が起こりえた。
-    let candidates: Vec<Talk> = (0..4).map(|_| dummy_talk("OnRandomTalk", None)).collect();
+    let candidates: Vec<Talk> = (0..4).map(|_| dummy_talk("OnRandomTalk")).collect();
     let alive_full: Vec<(usize, &Talk)> = as_alive(&candidates);
     let alive_single: Vec<(usize, &Talk)> = candidates.iter().enumerate().take(1).collect();
 
@@ -166,7 +166,7 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
     #[test]
     fn test_all_candidates_appear_exactly_once_per_cycle() {
         // 1周（候補数ぶん）引くと、全候補がちょうど1回ずつ出る
-        let candidates: Vec<Talk> = (0..5).map(|_| dummy_talk("OnRandomTalk", None)).collect();
+        let candidates: Vec<Talk> = (0..5).map(|_| dummy_talk("OnRandomTalk")).collect();
         let alive: Vec<(usize, &Talk)> = as_alive(&candidates);
         let mut sel = TalkSelector::new();
 
@@ -182,30 +182,9 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
     }
 
     #[test]
-    fn test_weight_field_is_ignored() {
-        // 重み(@N)を混在させても、このセレクタでは無視され
-        // 1周のうちに全件ちょうど1回ずつ出ることの確認。
-        let candidates: Vec<Talk> = vec![
-            dummy_talk("OnRandomTalk", Some(10)),
-            dummy_talk("OnRandomTalk", None),
-            dummy_talk("OnRandomTalk", Some(1)),
-        ];
-        let alive: Vec<(usize, &Talk)> = as_alive(&candidates);
-        let mut sel = TalkSelector::new();
-
-        let mut seen = vec![0usize; candidates.len()];
-        for _ in 0..3 {
-            let picked = sel.select_alive("OnRandomTalk", &alive);
-            let idx = candidates.iter().position(|t| std::ptr::eq(t, picked)).unwrap();
-            seen[idx] += 1;
-        }
-        assert_eq!(seen, vec![1, 1, 1], "重みが効いてしまっている（均等に1回ずつ出ていない）: {:?}", seen);
-    }
-
-    #[test]
     fn test_no_adjacent_repeat_across_many_cycles() {
         // 奇数個の候補でも周回の境目で連続しないことを確認
-        let candidates: Vec<Talk> = (0..3).map(|_| dummy_talk("OnRandomTalk", None)).collect();
+        let candidates: Vec<Talk> = (0..3).map(|_| dummy_talk("OnRandomTalk")).collect();
         let alive: Vec<(usize, &Talk)> = as_alive(&candidates);
         let mut sel = TalkSelector::new();
 
@@ -222,7 +201,7 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
     fn test_cond_change_rebuilds_queue_safely() {
         // condで候補が減った場合、queueに存在しない候補が残っていても
         // panicせず正しく組み直されることの確認
-        let candidates: Vec<Talk> = (0..4).map(|_| dummy_talk("OnRandomTalk", None)).collect();
+        let candidates: Vec<Talk> = (0..4).map(|_| dummy_talk("OnRandomTalk")).collect();
         let alive_full: Vec<(usize, &Talk)> = as_alive(&candidates);
         let alive_partial: Vec<(usize, &Talk)> = candidates.iter().enumerate().take(2).collect();
         let mut sel = TalkSelector::new();
@@ -242,7 +221,7 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
 fn test_queue_not_rebuilt_mid_cycle_with_stable_candidates() {
     // 候補が変わらない限り、1周の途中で毎回組み直されていないことを
     // 間接的に確認する。組み直されていれば全候補一致は保証されない。
-    let candidates: Vec<Talk> = (0..5).map(|_| dummy_talk("OnRandomTalk", None)).collect();
+    let candidates: Vec<Talk> = (0..5).map(|_| dummy_talk("OnRandomTalk")).collect();
     let alive: Vec<(usize, &Talk)> = as_alive(&candidates);
     let mut sel = TalkSelector::new();
 

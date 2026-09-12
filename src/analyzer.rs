@@ -48,17 +48,6 @@ pub fn analyze(
    for event_name in talk_names_sorted {
         let talk_list = &talks[event_name];
 
-        // @N は構文としてはパースされるが、TalkSelectorは重みを使わない
-        // （全候補を均等に扱い、1周保証で選ぶ）。書いても無言で無視されるため、
-        // 作者が気づけるようここで一度だけ通知する。
-        // 同一イベントに複数の@Nがあってもメッセージは1件にまとめる。
-        if talk_list.iter().any(|t| t.weight.is_some()) {
-            self.errors.push(AnalyzeError {
-                level: "warning".to_string(),
-                event: event_name.clone(),
-                message: "@による重み指定は現在のバージョンでは選択に影響しません（全候補が均等に、1周するまで重複しない方式で選ばれます）".to_string(),
-            });
-        }
         for talk in talk_list {
             self.current_context = &talk.event;
             self.loop_depth = 0;
@@ -268,54 +257,6 @@ mod tests {
     }
 
 #[test]
-    fn test_weight_produces_warning() {
-        let src = r#"
-OnRandomTalk @3 => {
-    湊: 重いトーク
-}
-OnRandomTalk => {
-    湊: 重みなし
-}
-"#;
-        let (talks, funcs) = parse_talks_and_funcs(src);
-        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
-        for t in &talks {
-            talk_map.entry(t.event.clone()).or_default().push(t.clone());
-        }
-        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
-        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
-
-        let errors = Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs);
-
-        let weight_warnings: Vec<_> = errors.iter()
-            .filter(|e| e.level == "warning" && e.message.contains("重み"))
-            .collect();
-        assert_eq!(weight_warnings.len(), 1, "イベント単位で1件にまとまっていない: {:?}", errors);
-        assert_eq!(weight_warnings[0].event, "OnRandomTalk");
-    }
-
-
-//Analyzer
-    #[test]
-    fn test_no_weight_produces_no_warning() {
-        let src = r#"OnBoot => {
-    湊: おはよう
-}"#;
-        let (talks, funcs) = parse_talks_and_funcs(src);
-        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
-        for t in &talks {
-            talk_map.entry(t.event.clone()).or_default().push(t.clone());
-        }
-        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
-        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
-
-        let errors = Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs);
-        assert!(
-            !errors.iter().any(|e| e.message.contains("重み")),
-            "重み指定がないのに警告が出ている: {:?}", errors
-        );
-    }
-    #[test]
     fn test_undefined_call_still_triggers_notice() {
         // ローカル関数を許容するようになった一方で、
         // 本当に未定義のcallはちゃんと検出できることの確認（縮退防止）
