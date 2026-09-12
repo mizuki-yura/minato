@@ -7,6 +7,10 @@ save.json
 # OS
 .DS_Store
 Thumbs.db
-
+*.bak
+*.tmp
+*.swp
+*.pdb
 # エディタ
 .vscode/
+.claude/
