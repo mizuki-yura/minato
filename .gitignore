@@ -1,0 +1,12 @@
+# Rust
+target/
+*.log
+save.json
+*コピー*
+*.txt
+# OS
+.DS_Store
+Thumbs.db
+
+# エディタ
+.vscode/

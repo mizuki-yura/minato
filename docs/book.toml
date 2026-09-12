@@ -1,0 +1,8 @@
+[book]
+title = "湊ドキュメント"
+authors = ["瑞樹ユラ"]
+language = "ja"
+src = "src"
+
+[output.html]
+no-section-label = true
