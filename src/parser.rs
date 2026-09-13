@@ -500,7 +500,15 @@ fn interpolated_str<'a>(
 fn surface<'a>() -> impl Parser<'a, &'a str, u32, extra::Err<Rich<'a, char>>> + Clone {
     just('[')
         .ignore_then(
-            text::int(10).map(|s: &str| s.parse::<u32>().unwrap())
+            text::int(10).validate(|s: &str, e, emitter| {
+                s.parse::<u32>().unwrap_or_else(|_| {
+                    emitter.emit(Rich::custom(
+                        e.span(),
+                        "サーフェス番号が大きすぎます（0〜4294967295の範囲で指定してください）".to_string(),
+                    ));
+                    u32::MAX
+                })
+            })
         )
         .then_ignore(just(']').labelled("サーフェス番号は「]」で閉じてください"))
 }
@@ -962,11 +970,27 @@ fn ends_with_bare_assign(s: &str) -> bool {
         && !t.ends_with("/=")
         && !t.ends_with("%=")
 }
+/// コード行（文字列リテラルの外側）における `{`/`(`/`[` の最大ネスト深さ。
+/// exprやstmtは再帰下降パーサーで実装されており構文的なネストの深さに
+/// 上限がないため、悪意ある/壊れた辞書ファイル（他人が配布したゴーストの
+/// 辞書を読み込むことが日常的な文化圏である以上、これは現実的な脅威）が
+/// `((((((...))))))`のような深い括弧のネストを仕込むと、Rustのネイティブ
+/// スタックを使い果たしてスタックオーバーフローになる。スタックオーバー
+/// フローはpanic=unwindでもcatch_unwindでは捕捉できず、無条件にプロセスを
+/// 強制終了させる。ここでプレーンなテキストスキャンとして事前に深さを
+/// 数えて打ち切ることで、パーサー本体（chumsky）には一切手を入れずに
+/// スタックオーバーフローを未然に防ぐ。
+/// （chumsky側のrecursiveな各パーサーをカスタムコンビネータで包んで
+/// 深さを数える実装も試したが、コンパイル時間が数分から20分超に
+/// 悪化したため採用しなかった）
+const MAX_NESTING_DEPTH: u32 = 200;
+
 pub fn preprocess(src: &str) -> Result<String, String> {
     let mut out = String::new();
     let mut buf: Option<String> = None;
     let mut prev_chara: Option<String> = None;
     let mut brace_stack: Vec<BraceKind> = Vec::new();   // ★ brace_depth → brace_stack
+    let mut nesting_depth: u32 = 0;
 
     for (line_idx, line) in src.lines().enumerate() {
         let line_num = line_idx + 1;
@@ -1021,7 +1045,9 @@ pub fn preprocess(src: &str) -> Result<String, String> {
         // 以降 is_in_map が真に張り付いてセリフ結合が効かなくなる。
         // さらに талの閉じ「}」がMapを剥がすため、ズレが後続へ残る。
         if matches!(kind, LineKind::Code | LineKind::Bare) {
-            for ev in scan_braces(trimmed) {
+            let events = scan_braces(trimmed, &mut nesting_depth)
+                .map_err(|e| format!("{}行目: {}", line_num, e))?;
+            for ev in events {
                 match ev {
                     BraceEvent::Open(k) => brace_stack.push(k),
                     BraceEvent::Close => { brace_stack.pop(); }
@@ -1099,7 +1125,17 @@ enum BraceEvent { Open(BraceKind), Close }
 /// それぞれが「ブロック」（if/for/while/foreach/func/match/elseの本体、
 /// トーク定義・matchアームの本体）か「マップリテラル」かを判定して
 /// 開閉イベント列を返す。
-fn scan_braces(trimmed: &str) -> Vec<BraceEvent> {
+/// ネスト深さを1増やし、上限を超えたらエラーにする
+fn bump_nesting_depth(depth: &mut u32) -> Result<(), String> {
+    *depth += 1;
+    if *depth > MAX_NESTING_DEPTH {
+        Err("構文のネストが深すぎます（{}・()・[]の入れ子を減らしてください）".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn scan_braces(trimmed: &str, depth: &mut u32) -> Result<Vec<BraceEvent>, String> {
     let mut events = Vec::new();
     let mut in_double = false;
     let mut in_single = false;
@@ -1132,6 +1168,7 @@ fn scan_braces(trimmed: &str) -> Vec<BraceEvent> {
                 continue;
             }
             '{' if !in_double && !in_single => {
+                bump_nesting_depth(depth)?;
                 if interp_depth > 0 {
                     interp_depth += 1;
                 } else {
@@ -1147,17 +1184,24 @@ fn scan_braces(trimmed: &str) -> Vec<BraceEvent> {
                 }
             }
             '}' if !in_double && !in_single => {
+                *depth = depth.saturating_sub(1);
                 if interp_depth > 0 {
                     interp_depth -= 1;
                 } else {
                     events.push(BraceEvent::Close);
                 }
             }
+            '(' | '[' if !in_double && !in_single => {
+                bump_nesting_depth(depth)?;
+            }
+            ')' | ']' if !in_double && !in_single => {
+                *depth = depth.saturating_sub(1);
+            }
             _ => {}
         }
         i += 1;
     }
-    events
+    Ok(events)
 }
 fn is_dialogue_line(s: &str) -> bool {
     let s = if s.starts_with('[') {
@@ -1594,8 +1638,52 @@ fn test_keyword_still_works_as_standalone_token() {
     assert!(items.is_ok(), "{:?}", items.err());
 }
 
+#[test]
+fn test_surface_number_overflow_does_not_panic() {
+    // u32::MAX を超えるサーフェス番号は、パニックせず構文エラーとして
+    // 報告されること（かつては .unwrap() でプロセスごとクラッシュしていた）
+    let src = r#"OnBoot => {
+    [99999999999]湊: こんにちは
+}"#;
+    let items = program_with_include().parse(src).into_result();
+    assert!(items.is_err(), "桁溢れしたサーフェス番号は構文エラーになるべき");
+}
 
-        
+#[test]
+fn test_deeply_nested_parens_are_rejected_before_parsing() {
+    // 悪意ある/壊れた辞書ファイルが極端に深い括弧のネストを仕込んでも、
+    // chumskyの再帰下降パーサーに到達する前にpreprocess()の時点で
+    // 安全な構文エラーとして打ち切られること（スタックオーバーフロー対策）
+    let opens = "(".repeat(300);
+    let closes = ")".repeat(300);
+    let src = format!("OnBoot => {{\n    let x = {}1{}\n}}", opens, closes);
+    let result = preprocess(&src);
+    assert!(result.is_err(), "300段の括弧ネストは構文エラーとして拒否されるべき");
+}
+
+#[test]
+fn test_deeply_nested_blocks_are_rejected_before_parsing() {
+    let opens = "if (1) {\n".repeat(300);
+    let src = format!("OnBoot => {{\n{}}}", opens);
+    let result = preprocess(&src);
+    assert!(result.is_err(), "300段のブロックネストは構文エラーとして拒否されるべき");
+}
+
+#[test]
+fn test_moderately_nested_expr_still_parses_normally() {
+    // 深さ制限が現実的な辞書スクリプトの正当なネストまで壊していないことの回帰確認
+    let opens = "(".repeat(20);
+    let closes = ")".repeat(20);
+    let src = format!(
+        "OnBoot => {{\n    let x = {}1{}\n    湊: ${{x}}\n}}",
+        opens, closes
+    );
+    let items = program_with_include().parse(&src).into_result();
+    assert!(items.is_ok(), "通常のネストまで拒否している: {:?}", items.err());
+}
+
+
+
         #[test]
 fn test_dialogue_containing_open_brace_does_not_corrupt_brace_stack() {
     let src = r#"OnBoot => {

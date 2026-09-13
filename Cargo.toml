@@ -47,4 +47,6 @@ opt-level = "z"       # サイズ優先最適化
 lto = true            # リンク時最適化
 codegen-units = 1
 strip = true          # シンボル削除
-panic = "abort"       # パニックハンドラを軽量化
+# panic = "abort"にするとcatch_unwind(lib.rs各所)が機能せず、
+# パニックが即プロセスabort(SSP本体ごと落ちる)になるため"unwind"のまま維持
+panic = "unwind"

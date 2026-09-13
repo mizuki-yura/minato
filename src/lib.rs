@@ -746,7 +746,17 @@ pub fn next_rand() -> u32 {
     z ^ (z >> 15)
 }
 /// 次回トーク予定時刻を計算（基本間隔＋揺らぎ）
+///
+/// interval/jitterはsave.jsonの改ざん・破損や台本の`global system.talk_jitter = ...`
+/// 経由で任意のu64値になりうる。巨大な値（例: u64::MAX）だと
+/// `jitter + 1`が0にラップして`%`が0除算パニックになったり、
+/// `Instant::now() + Duration::from_secs(...)`がInstantの表現可能範囲を
+/// 超えてパニックしうるため、現実的な上限でクランプしてから計算する。
+const MAX_TALK_DELAY_SECS: u64 = 60 * 60 * 24 * 30; // 30日
+
 fn next_talk_time(interval: u64, jitter: u64) -> Instant {
+    let interval = interval.min(MAX_TALK_DELAY_SECS);
+    let jitter = jitter.min(MAX_TALK_DELAY_SECS);
     let j = if jitter > 0 { next_rand() as u64 % (jitter + 1) } else { 0 };
     Instant::now() + Duration::from_secs(interval + j)
 }
@@ -1295,6 +1305,42 @@ fn test_save_json_not_clobbered_after_parse_error_boot() {
 
     let json = std::fs::read_to_string(dir.path().join("save.json")).expect("save.jsonが消えている");
     assert!(json.contains("42"), "パースエラー起動でsave.jsonが上書きされた: {}", json);
+
+    if let Ok(mut s) = STATE.lock() { *s = None; }
+}
+
+#[test]
+fn test_next_talk_time_does_not_panic_on_huge_values() {
+    // jitter+1がu64::MAXからラップして0除算になる、あるいはInstant加算が
+    // オーバーフローするケースを再現し、パニックしないことを確認する
+    let _ = next_talk_time(u64::MAX, u64::MAX);
+    let _ = next_talk_time(0, u64::MAX);
+    let _ = next_talk_time(u64::MAX, 0);
+}
+
+#[test]
+fn test_save_json_huge_talk_jitter_does_not_crash_init() {
+    // save.jsonが改ざん/破損してtalk_jitterに巨大な数値が入っていても
+    // ロード直後の次回トーク時刻計算でパニックしないこと
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    if let Ok(mut s) = STATE.lock() { *s = None; }
+
+    let dir = tempfile::tempdir().expect("tempdir作成失敗");
+    std::fs::write(
+        dir.path().join("save.json"),
+        r#"{"system":{"talk_jitter":1e20}}"#,
+    ).expect("save.json書き込み失敗");
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[characters]\n\"湊\" = \"\\\\0\"\n",
+    ).expect("config.toml書き込み失敗");
+    std::fs::create_dir(dir.path().join("talks")).expect("talks作成失敗");
+    std::fs::write(
+        dir.path().join("talks").join("main.mnt"),
+        "OnBoot => {\n    湊: おはよう\n}\n",
+    ).expect("main.mnt書き込み失敗");
+
+    let _state = init(dir.path()).expect("init失敗");
 
     if let Ok(mut s) = STATE.lock() { *s = None; }
 }

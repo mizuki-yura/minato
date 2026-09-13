@@ -8,7 +8,7 @@ use std::path::Path;
 use encoding_rs::SHIFT_JIS;  // ★追加
 use winapi::shared::minwindef::{HGLOBAL, HMODULE};
 use winapi::um::libloaderapi::{FreeLibrary, GetProcAddress, LoadLibraryW};
-use winapi::um::winbase::{GlobalAlloc, GlobalFree, GMEM_FIXED};
+use winapi::um::winbase::{GlobalAlloc, GlobalFree, GlobalSize, GMEM_FIXED};
 
 type LoadFn    = unsafe extern "C" fn(HGLOBAL, c_long) -> i32;
 type RequestFn = unsafe extern "C" fn(HGLOBAL, *mut c_long) -> HGLOBAL;
@@ -111,7 +111,12 @@ unsafe {
             if res_mem.is_null() {
                 return HashMap::new();
             }
-            let res_bytes = std::slice::from_raw_parts(res_mem as *const u8, len as usize);
+            // SAORI DLL（外部プラグイン）が書き込んだlenは信用しない。
+            // OSがres_memについて把握している実際の確保サイズ（GlobalSize）を
+            // 真の上限として使い、lenをその範囲内にクランプする。
+            let alloc_size = GlobalSize(res_mem);
+            let safe_len = clamp_response_len(len, alloc_size);
+            let res_bytes = std::slice::from_raw_parts(res_mem as *const u8, safe_len);
             let s = String::from_utf8_lossy(res_bytes).to_string();
             GlobalFree(res_mem);
             s
@@ -120,6 +125,21 @@ unsafe {
         parse_response(&response)
     }
 
+}
+
+/// SAORI DLLが`request_fn`経由で報告してきた応答長`len`を検証する。
+///
+/// 壊れた/悪意あるSAORI DLLがlenに負の値や実際のバッファより大きい値を
+/// 返すと、そのままusizeへキャストして`from_raw_parts`に渡した場合に
+/// 範囲外メモリ読み取り（クラッシュ・情報漏洩）につながる。
+/// `alloc_size`にはOSが把握している実際の確保サイズ（GlobalSize）を渡し、
+/// 常にその範囲内に収まる長さを返す。
+fn clamp_response_len(len: c_long, alloc_size: usize) -> usize {
+    if len < 0 {
+        0
+    } else {
+        (len as usize).min(alloc_size)
+    }
 }
 
 /// SAORI/1.0リクエスト文字列を組み立てる
@@ -198,6 +218,26 @@ fn test_build_load_payload_length_excludes_nul_terminator() {
     let payload = build_load_payload(dir);
     let len_for_saori = payload.len() - 1;
     assert_eq!(len_for_saori, "C:/test\\".len());
+}
+
+#[test]
+fn test_clamp_response_len_rejects_negative_len() {
+    // 壊れた/悪意あるSAORIがlenに負の値を返してもusize化で巨大値にならない
+    assert_eq!(clamp_response_len(-1, 1024), 0);
+    assert_eq!(clamp_response_len(c_long::MIN, 1024), 0);
+}
+
+#[test]
+fn test_clamp_response_len_caps_at_actual_allocation_size() {
+    // lenが実際のGlobalAlloc確保サイズより大きい値を主張していても、
+    // 確保サイズを超えて読まないようクランプされる
+    assert_eq!(clamp_response_len(1_000_000, 16), 16);
+}
+
+#[test]
+fn test_clamp_response_len_passes_through_when_within_bounds() {
+    assert_eq!(clamp_response_len(10, 16), 10);
+    assert_eq!(clamp_response_len(0, 16), 0);
 }
 
 #[test]

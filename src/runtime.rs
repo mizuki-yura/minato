@@ -18,11 +18,19 @@ impl TalkSelector {
         Self { queue: HashMap::new(), built_from: HashMap::new(), last: HashMap::new() }
     }
 
+    /// `alive`から1件選んで返す。呼び出し元は現状すべて事前に
+    /// `alive.is_empty()`を弾いているが、その契約は型で保証されておらず
+    /// 将来別の呼び出し元が追加されると崩れうる。この関数自身が空でも
+    /// panicせず`None`を返すことで、その契約が破られても
+    /// プロセスクラッシュに直結しないようにする。
     pub fn select_alive<'a>(
         &mut self,
         event: &str,
         alive: &[(usize, &'a Talk)]
-    ) -> &'a Talk {
+    ) -> Option<&'a Talk> {
+        if alive.is_empty() {
+            return None;
+        }
         if alive.len() == 1 {
             self.last.insert(event.to_string(), alive[0].0);
             // 候補が1件になった時点で「1周保証」も「隣接非重複」も
@@ -33,7 +41,7 @@ impl TalkSelector {
             // ここでlastに記録したIDが直後にpopされうる。
             self.queue.remove(event);
             self.built_from.remove(event);
-            return alive[0].1;
+            return Some(alive[0].1);
         }
 
         let alive_ids: Vec<usize> = alive.iter().map(|(o, _)| *o).collect();
@@ -49,10 +57,13 @@ impl TalkSelector {
             self.built_from.insert(event.to_string(), alive_ids);
         }
 
-        let q = self.queue.get_mut(event).unwrap();
-        let picked_orig = q.pop().expect("rebuild直後なのでqueueは空でないはず");
+        // rebuild直後ならqueueは非空のはずだが、それも呼び出し元の契約と
+        // 同様に型で保証されているわけではないため、`?`で素直にNoneへ
+        // 逃がす（unwrap/expectでのpanicを避ける）。
+        let q = self.queue.get_mut(event)?;
+        let picked_orig = q.pop()?;
         self.last.insert(event.to_string(), picked_orig);
-        alive.iter().find(|(o, _)| *o == picked_orig).unwrap().1
+        alive.iter().find(|(o, _)| *o == picked_orig).map(|(_, t)| *t)
     }
 }
 
@@ -72,6 +83,12 @@ fn same_id_set(a: &[usize], b: &[usize]) -> bool {
 fn shuffled(ids: &[usize], forbid_first: Option<usize>) -> Vec<usize> {
     let mut v = ids.to_vec();
     let n = v.len();
+    if n == 0 {
+        // 呼び出し元(select_alive)は現状alive非空を保証してから呼ぶが、
+        // 将来の変更でここが崩れても v[n-1] のアンダーフローで
+        // panicしないよう自己防御する。
+        return v;
+    }
     for i in (1..n).rev() {
         let j = (crate::next_rand() as usize) % (i + 1);
         v.swap(i, j);
@@ -105,12 +122,30 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_alive_returns_none_instead_of_panicking() {
+        // 呼び出し元の「aliveは非空」という契約が将来崩れても、
+        // select_alive自身がpanicせずNoneを返すことの確認
+        let mut sel = TalkSelector::new();
+        let alive: Vec<(usize, &Talk)> = vec![];
+        assert!(sel.select_alive("OnRandomTalk", &alive).is_none());
+    }
+
+    #[test]
+    fn test_shuffled_with_empty_ids_does_not_panic() {
+        // v[n-1]のアンダーフローを避けられていることの直接確認
+        let result = shuffled(&[], None);
+        assert!(result.is_empty());
+        let result = shuffled(&[], Some(42));
+        assert!(result.is_empty());
+    }
+
+    #[test]
     fn test_single_candidate() {
         let candidates = vec![dummy_talk("OnBoot")];
         let alive = as_alive(&candidates);
         let mut sel = TalkSelector::new();
         for _ in 0..5 {
-            let t = sel.select_alive("OnBoot", &alive);
+            let t = sel.select_alive("OnBoot", &alive).expect("aliveは非空");
             assert_eq!(t.event, "OnBoot");
         }
     }
@@ -123,7 +158,7 @@ mod tests {
 
         let mut prev: Option<usize> = None;
         for _ in 0..500 {
-            let picked = sel.select_alive("OnRandomTalk", &alive);
+            let picked = sel.select_alive("OnRandomTalk", &alive).expect("aliveは非空");
             let idx = candidates.iter().position(|t| std::ptr::eq(t, picked)).unwrap();
             assert_ne!(Some(idx), prev, "同じトークが連続で選ばれた");
             prev = Some(idx);
@@ -149,11 +184,11 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
         sel.select_alive("OnRandomTalk", &alive_full);
 
         // condで1件だけに絞られる（早期returnを通る）
-        let single = sel.select_alive("OnRandomTalk", &alive_single);
+        let single = sel.select_alive("OnRandomTalk", &alive_single).expect("aliveは非空");
         let single_idx = candidates.iter().position(|t| std::ptr::eq(t, single)).unwrap();
 
         // condが戻って4件に復帰
-        let next = sel.select_alive("OnRandomTalk", &alive_full);
+        let next = sel.select_alive("OnRandomTalk", &alive_full).expect("aliveは非空");
         let next_idx = candidates.iter().position(|t| std::ptr::eq(t, next)).unwrap();
 
         assert_ne!(
@@ -173,7 +208,7 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
         for cycle in 0..20 {
             let mut seen = vec![0usize; candidates.len()];
             for _ in 0..5 {
-                let picked = sel.select_alive("OnRandomTalk", &alive);
+                let picked = sel.select_alive("OnRandomTalk", &alive).expect("aliveは非空");
                 let idx = candidates.iter().position(|t| std::ptr::eq(t, picked)).unwrap();
                 seen[idx] += 1;
             }
@@ -190,7 +225,7 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
 
         let mut prev: Option<usize> = None;
         for _ in 0..300 {
-            let picked = sel.select_alive("OnRandomTalk", &alive);
+            let picked = sel.select_alive("OnRandomTalk", &alive).expect("aliveは非空");
             let idx = candidates.iter().position(|t| std::ptr::eq(t, picked)).unwrap();
             assert_ne!(Some(idx), prev, "周回境界で同じトークが連続した");
             prev = Some(idx);
@@ -211,7 +246,7 @@ fn test_single_candidate_detour_does_not_break_adjacent_rule() {
         }
         // 候補が4→2に減った状態で呼んでもpanicしないこと
         for _ in 0..20 {
-            let picked = sel.select_alive("OnRandomTalk", &alive_partial);
+            let picked = sel.select_alive("OnRandomTalk", &alive_partial).expect("aliveは非空");
             assert!(candidates[0..2].iter().any(|t| std::ptr::eq(t, picked)));
         }
     }
@@ -228,7 +263,7 @@ fn test_queue_not_rebuilt_mid_cycle_with_stable_candidates() {
     for cycle in 0..50 {
         let mut seen = vec![0usize; candidates.len()];
         for _ in 0..5 {
-            let picked = sel.select_alive("OnRandomTalk", &alive);
+            let picked = sel.select_alive("OnRandomTalk", &alive).expect("aliveは非空");
             let idx = candidates.iter().position(|t| std::ptr::eq(t, picked)).unwrap();
             seen[idx] += 1;
         }

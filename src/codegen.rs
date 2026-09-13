@@ -986,6 +986,13 @@ pub struct Codegen {
 }
 
 const LOOP_LIMIT: usize = 2000;
+/// format()の幅・精度指定の上限。辞書スクリプトから
+/// `${format('%9999999999s', 'x')}`のような桁数を渡されると、
+/// 上限なしでは" ".repeat(pad_len)等が数十億文字の確保を試み、
+/// アロケータのhandle_alloc_errorで即abortする（catch_unwindでも
+/// panic=unwindでも捕まえられない）。LOOP_LIMITやFILE_READ_LIMIT
+/// 同様、辞書由来の値は必ずクランプする。
+const FORMAT_MAX_WIDTH: usize = 1000;
 
 enum FlowControl {
     Return(Value),
@@ -1098,7 +1105,10 @@ self.current_scope = None;
         self.env.pop_scope();
         return None;
     }
-    let talk: Talk = self.selector.select_alive(event, &alive).clone();
+    let talk: Talk = match self.selector.select_alive(event, &alive) {
+        Some(t) => t.clone(),
+        None => { self.env.pop_scope(); return None; }
+    };
     append_log!(format!("enter talk: {} (event={})", talk.event, event));
     let mut out = String::new();
 
@@ -1354,17 +1364,28 @@ let alive = self.filter_alive(&candidates);
                 format!("call「{}」の候補が全てcondで除外され、何も出力されませんでした", name)
             ));
         } else {
-            let talk = self.selector.select_alive(&name, &alive).clone();
-            append_log!(format!("enter talk (call): {}", talk.event));
-            self.env.push_scope();
+            match self.selector.select_alive(&name, &alive) {
+                Some(t) => {
+                    let talk = t.clone();
+                    append_log!(format!("enter talk (call): {}", talk.event));
+                    self.env.push_scope();
 
-            let result = self.run_stmts(&talk.body, out);
-            self.env.pop_scope();
-            self.env.call_depth -= 1;
+                    let result = self.run_stmts(&talk.body, out);
+                    self.env.pop_scope();
+                    self.env.call_depth -= 1;
 
-            if let Some(FlowControl::Return(val)) = result {
-                append_log!(format!("call return val: {:?}", val.to_display()));
-                out.push_str(&val.to_display());
+                    if let Some(FlowControl::Return(val)) = result {
+                        append_log!(format!("call return val: {:?}", val.to_display()));
+                        out.push_str(&val.to_display());
+                    }
+                }
+                None => {
+                    self.env.call_depth -= 1;
+                    self.errors.push((
+                        "notice".to_string(),
+                        format!("call「{}」の候補選択に失敗し、何も出力されませんでした", name)
+                    ));
+                }
             }
         }
     }
@@ -1446,18 +1467,28 @@ Expr::Call(fname, args) => {
         let alive = self.filter_alive(&candidates);
 
         if !alive.is_empty() {
-            let talk = self.selector.select_alive(fname, &alive).clone();
-            self.env.push_scope();
-            append_log!(format!("enter talk (call): {}", talk.event));
-            let saved_scope = self.current_scope.take();
-let saved_spoken = std::mem::take(&mut self.spoken_scopes);
-            match self.run_stmts(&talk.body, &mut tmp_out) {
-                Some(FlowControl::Return(val)) => { tmp_out.push_str(&val.to_display()); }
-                _ => {}
+            match self.selector.select_alive(fname, &alive) {
+                Some(t) => {
+                    let talk = t.clone();
+                    self.env.push_scope();
+                    append_log!(format!("enter talk (call): {}", talk.event));
+                    let saved_scope = self.current_scope.take();
+                    let saved_spoken = std::mem::take(&mut self.spoken_scopes);
+                    match self.run_stmts(&talk.body, &mut tmp_out) {
+                        Some(FlowControl::Return(val)) => { tmp_out.push_str(&val.to_display()); }
+                        _ => {}
+                    }
+                    self.current_scope = saved_scope;
+                    self.spoken_scopes = saved_spoken;
+                    self.env.pop_scope();
+                }
+                None => {
+                    self.errors.push((
+                        "notice".to_string(),
+                        format!("「{}()」の候補選択に失敗し、空文字列になりました", fname)
+                    ));
+                }
             }
-            self.current_scope = saved_scope;
-self.spoken_scopes = saved_spoken;
-            self.env.pop_scope();
                } else {
             self.errors.push((
                 "notice".to_string(),
@@ -1733,24 +1764,31 @@ else {
             chars.next();
         }
         // 幅
+        // 桁数に上限がないと、大量の数字（例: %9999999999999999999s）で
+        // usizeの乗算オーバーフローや、後続の"..".repeat(width)による
+        // 巨大なメモリ確保（アロケータの即abortに直結）を招くため、
+        // saturatingで演算しつつFORMAT_MAX_WIDTHでクランプする。
         while let Some(&d) = chars.peek() {
             if d.is_ascii_digit() {
-                width = width * 10 + (d as usize - '0' as usize);
+                width = width.saturating_mul(10)
+                    .saturating_add(d as usize - '0' as usize)
+                    .min(FORMAT_MAX_WIDTH);
                 chars.next();
             } else { break; }
         }
         // 精度
- // 精度
 if chars.peek() == Some(&'.') {
     chars.next();
     let mut prec = 0usize;
     while let Some(&d) = chars.peek() {
         if d.is_ascii_digit() {
-            prec = prec * 10 + (d as usize - '0' as usize);
+            prec = prec.saturating_mul(10)
+                .saturating_add(d as usize - '0' as usize)
+                .min(FORMAT_MAX_WIDTH);
             chars.next();
         } else { break; }
     }
-    precision = Some(prec);  
+    precision = Some(prec);
 }
 
 // 型指定子
@@ -3133,6 +3171,29 @@ fn test_format_no_width_specifier_unchanged() {
     let talks = parse_talks(src);
     let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\07/あ\\e");
+}
+
+#[test]
+fn test_format_huge_width_is_clamped_instead_of_allocating_unbounded() {
+    // 辞書スクリプトが桁数の大きいwidthを指定しても、数十億文字の確保を
+    // 試みてabortすることなく、FORMAT_MAX_WIDTHでクランプされること
+    let src = r#"OnBoot => {
+    湊: ${format('%9999999999999999999999s', 'x')}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    // "\0" + パディング + "x" + "\e" のうち、パディング長がFORMAT_MAX_WIDTH-1以下に収まっていること
+    assert!(out.len() < 2000, "widthがクランプされずに巨大な文字列になっている: len={}", out.len());
+}
+
+#[test]
+fn test_format_huge_precision_is_clamped() {
+    let src = r#"OnBoot => {
+    湊: ${format('%.9999999999999999999999f', 1.5)}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert!(out.len() < 2000, "precisionがクランプされずに巨大な文字列になっている: len={}", out.len());
 }
 
 
