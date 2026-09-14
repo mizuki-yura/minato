@@ -73,6 +73,14 @@ const PANIC_BAK: &str = "save.json.panic.bak";
 const PANIC_BAK_NOTIFIED: &str = "save.json.panic.bak.notified";
 const CORRUPT_BAK: &str = "save.json.corrupt.bak";
 
+/// SSPからFFI境界で渡される長さ(c_long、符号あり)をusizeへ安全に変換する。
+/// 負値をそのまま`as usize`すると巨大な値になり、`from_raw_parts`で
+/// 範囲外メモリ読み取りにつながる。SSPは通常正しい値を渡すが、
+/// 呼び出し元の実装バグ等に対する防御として下限0にクランプする。
+fn safe_len(len: c_long) -> usize {
+    len.max(0) as usize
+}
+
 // ═══════════════════════════════════════════════════════════
 // ② append_log 関数の直後に以下を追加
 // ═══════════════════════════════════════════════════════════
@@ -101,7 +109,7 @@ pub extern "C" fn loadu(h: HGLOBAL, len: c_long) -> i32 {
             }
         }
         let dir = unsafe {
-            let bytes = std::slice::from_raw_parts(h as *const u8, len as usize);
+            let bytes = std::slice::from_raw_parts(h as *const u8, safe_len(len));
             let s = std::str::from_utf8(bytes).unwrap_or("").trim_end_matches('\0').trim_end_matches('\\').trim_end_matches('/');
             let path = PathBuf::from(s);
             GlobalFree(h);
@@ -144,7 +152,7 @@ pub extern "C" fn load(h: HGLOBAL, len: c_long) -> i32 {
             return 1;
         }
         let dir = unsafe {
-            let bytes = std::slice::from_raw_parts(h as *const u8, len as usize);
+            let bytes = std::slice::from_raw_parts(h as *const u8, safe_len(len));
             let (s, _, _) = SHIFT_JIS.decode(bytes);
             let path = PathBuf::from(s.trim_end_matches('\0').trim_end_matches('\\').trim_end_matches('/'));
             GlobalFree(h);
@@ -192,9 +200,13 @@ pub extern "C" fn unload() -> i32 {
 #[no_mangle]
 pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
     append_log!(format!("request called"));
+    if h.is_null() {
+        append_log!(format!("request: h is null"));
+        return std::ptr::null_mut();
+    }
     let response = std::panic::catch_unwind(|| {
         unsafe {
-            let bytes = std::slice::from_raw_parts(h as *const u8, *len as usize);
+            let bytes = std::slice::from_raw_parts(h as *const u8, safe_len(*len));
             let req_str = SHIFT_JIS.decode(bytes).0.into_owned(); // ← Cowを所有権ありStringに変換
 
             let result = handle_request(&req_str); // ← GlobalFreeより先に処理を終わらせる
@@ -217,6 +229,13 @@ pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
         let bytes = encoded.as_ref();
         let size = bytes.len() + 1;
         let mem = GlobalAlloc(GMEM_FIXED, size);
+        if mem.is_null() {
+            // OOM等でメモリ確保に失敗。nullへ書き込むとクラッシュするため、
+            // ここで諦めてnullを返す（SSP側は失敗として扱う）。
+            append_log!(format!("request: GlobalAlloc failed"));
+            *len = 0;
+            return std::ptr::null_mut();
+        }
         let ptr = mem as *mut u8;
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
         *ptr.add(bytes.len()) = 0;
@@ -233,16 +252,25 @@ fn load_program_guarded(
 > {
     let main = main.to_path_buf();
 
-    let join_result = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024) // 16MB
         .spawn(move || {
             let mut visited = HashSet::new();
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 load_program(&main, &mut visited)
             }))
-        })
-        .expect("loadu: パーススレッドの起動に失敗しました")
-        .join();
+        });
+
+    let handle = match spawned {
+        Ok(h) => h,
+        Err(e) => {
+            append_log!(format!("loadu: パーススレッドの起動に失敗しました: {}", e));
+            return Err(LoadError::PreprocessError(
+                "パース処理を開始できませんでした（システムのリソース不足の可能性があります）。少し待ってから再度お試しください。".to_string()
+            ));
+        }
+    };
+    let join_result = handle.join();
 
     match join_result {
         Ok(Ok(parse_result)) => parse_result,

@@ -616,7 +616,11 @@ fn call_builtin(name: &str, vals: Vec<Value>) -> Value {
         "to_deg" => Value::Number(vals.get(0).map(|v| v.as_number().to_degrees()).unwrap_or(0.0)),
         "to_hex" => {
             let n = vals.get(0).map(|v| v.as_number() as i64).unwrap_or(0);
-            let digits = vals.get(1).map(|v| v.as_number() as usize).unwrap_or(0);
+            // as_number()はf64なので、辞書スクリプトが1e20のような巨大な値を
+            // 渡すとusizeへのsaturatingキャストでusize::MAXになりうる。
+            // format!のwidthに巨大な値を渡すとOOM即abortに直結するため
+            // FORMAT_MAX_WIDTHでクランプする。
+            let digits = vals.get(1).map(|v| (v.as_number() as usize).min(FORMAT_MAX_WIDTH)).unwrap_or(0);
             if digits > 0 { Value::Str(format!("{:0>width$x}", n, width = digits)) }
             else          { Value::Str(format!("{:x}", n)) }
         }
@@ -3196,6 +3200,27 @@ fn test_format_huge_precision_is_clamped() {
     assert!(out.len() < 2000, "precisionがクランプされずに巨大な文字列になっている: len={}", out.len());
 }
 
+#[test]
+fn test_to_hex_huge_digits_is_clamped() {
+    // 辞書スクリプトがto_hexの桁数指定に巨大な値を渡しても、
+    // FORMAT_MAX_WIDTHでクランプされOOM abortに至らないこと
+    let src = r#"OnBoot => {
+    湊: ${to_hex(1, 99999999999999999999)}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert!(out.len() < 2000, "digitsがクランプされずに巨大な文字列になっている: len={}", out.len());
+}
+
+#[test]
+fn test_to_hex_normal_digits_unchanged() {
+    let src = r#"OnBoot => {
+    湊: ${to_hex(255, 4)}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\000ff\\e");
+}
 
 
 

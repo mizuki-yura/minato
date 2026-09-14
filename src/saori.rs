@@ -86,6 +86,11 @@ let init_bytes = build_load_payload(saori_dir);
 
 unsafe {
     let mem = GlobalAlloc(GMEM_FIXED, init_bytes.len());
+    if mem.is_null() {
+        // OOM等でメモリ確保に失敗。nullへの書き込みを避けてloadは諦める
+        // （SAORI自体は既にロード済みなので、パスの通知だけ失敗する形になる）。
+        return Ok(dll);
+    }
     std::ptr::copy_nonoverlapping(init_bytes.as_ptr(), mem as *mut u8, init_bytes.len());
     (dll.load_fn)(mem, (init_bytes.len() - 1) as c_long);
 }
@@ -100,6 +105,9 @@ unsafe {
 
         let response = unsafe {
             let mem = GlobalAlloc(GMEM_FIXED, bytes.len() + 1);
+            if mem.is_null() {
+                return HashMap::new();
+            }
             let ptr = mem as *mut u8;
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
             *ptr.add(bytes.len()) = 0;
