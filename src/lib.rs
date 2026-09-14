@@ -1012,7 +1012,7 @@ mod save_load_tests {
     #[test]
     fn test_roundtrip_primitives() {
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
 
         // 数値・文字列・bool・Nullを混在させて保存
         let mut m = IndexMap::new();
@@ -1020,10 +1020,10 @@ mod save_load_tests {
         m.insert("名前".to_string(),     Value::Str("朝霧湊".to_string()));
         m.insert("フラグ".to_string(),   Value::Bool(true));
         m.insert("未設定".to_string(),   Value::Null);
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
         // 保存
-        save_globals(&gen, dir.path()).expect("save失敗");
+        save_globals(&cg, dir.path()).expect("save失敗");
 
         // 別のCodegenで読み直す
         let mut gen2 = make_gen();
@@ -1046,14 +1046,14 @@ mod save_load_tests {
     #[test]
     fn test_roundtrip_float() {
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
 
         let mut m = IndexMap::new();
         m.insert("体重".to_string(), Value::Number(57.8));
         m.insert("pi".to_string(),   Value::Number(std::f64::consts::PI));
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&gen, dir.path()).expect("save失敗");
+        save_globals(&cg, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1073,7 +1073,7 @@ mod save_load_tests {
     #[test]
     fn test_roundtrip_nested_map() {
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
 
         // save.stats.win = 10, save.stats.lose = 3
         let mut stats = IndexMap::new();
@@ -1082,9 +1082,9 @@ mod save_load_tests {
 
         let mut m = IndexMap::new();
         m.insert("stats".to_string(), Value::Map(stats));
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&gen, dir.path()).expect("save失敗");
+        save_globals(&cg, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1107,7 +1107,7 @@ mod save_load_tests {
     #[test]
     fn test_roundtrip_array() {
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
 
         let arr = Value::Array(vec![
             Value::Str("りんご".to_string()),
@@ -1116,9 +1116,9 @@ mod save_load_tests {
         ]);
         let mut m = IndexMap::new();
         m.insert("履歴".to_string(), arr);
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&gen, dir.path()).expect("save失敗");
+        save_globals(&cg, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1147,16 +1147,16 @@ mod save_load_tests {
     #[test]
     fn test_roundtrip_key_order() {
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
 
         let keys = vec!["z", "a", "m", "b"];
         let mut m = IndexMap::new();
         for k in &keys {
             m.insert(k.to_string(), Value::Number(1.0));
         }
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&gen, dir.path()).expect("save失敗");
+        save_globals(&cg, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1182,12 +1182,12 @@ mod save_load_tests {
     #[test]
     fn test_load_no_file() {
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
         // ファイルがなくてもエラーにならない
-        let result = load_globals(&mut gen, dir.path());
+        let result = load_globals(&mut cg, dir.path());
         assert!(result.is_ok());
         // saveキーは存在しない
-        assert!(gen.env.globals.get("save").is_none());
+        assert!(cg.env.globals.get("save").is_none());
     }
 
     // ── save.jsonが壊れている場合 ────────────────────────────
@@ -1199,15 +1199,15 @@ mod save_load_tests {
         std::fs::write(dir.path().join("save.json"), b"{ broken json }")
             .expect("書き込み失敗");
 
-        let mut gen = make_gen();
+        let mut cg = make_gen();
         // パニックせずOkを返し、バックアップを作る
-        let result = load_globals(&mut gen, dir.path());
+        let result = load_globals(&mut cg, dir.path());
         assert!(result.is_ok());
 
         // save.json.bak が作られているか
         assert!(dir.path().join("save.json.corrupt.bak").exists(), "bakファイルが作られていない");
         // saveキーは空のまま
-        assert!(gen.env.globals.get("save").is_none());
+        assert!(cg.env.globals.get("save").is_none());
     }
 
     // ── アトミック書き込み（tmpファイルが残らない）──────────
@@ -1215,12 +1215,12 @@ mod save_load_tests {
     #[test]
     fn test_save_no_tmp_remains() {
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
         let mut m = IndexMap::new();
         m.insert("x".to_string(), Value::Number(1.0));
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&gen, dir.path()).expect("save失敗");
+        save_globals(&cg, dir.path()).expect("save失敗");
 
         // .tmp が残っていないこと
         assert!(!dir.path().join("save.json.tmp").exists(), "tmpファイルが残っている");
@@ -1272,16 +1272,16 @@ fn test_is_already_initialized_reflects_state() {
 fn test_panic_bak_and_corrupt_bak_coexist() {
     let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_dir();
-    let mut gen = make_gen();
+    let mut cg = make_gen();
     let mut m = IndexMap::new();
     m.insert("x".to_string(), Value::Number(1.0));
-    gen.env.globals.insert("save".to_string(), Value::Map(m));
+    cg.env.globals.insert("save".to_string(), Value::Map(m));
 
     // パニック退避を作る
     PANICKED.store(false, Ordering::Relaxed);
-    save_globals(&gen, dir.path()).expect("1回目のsave失敗");
+    save_globals(&cg, dir.path()).expect("1回目のsave失敗");
     PANICKED.store(true, Ordering::Relaxed);
-    save_globals(&gen, dir.path()).expect("2回目のsave失敗");
+    save_globals(&cg, dir.path()).expect("2回目のsave失敗");
     assert!(dir.path().join(PANIC_BAK).exists(), "パニック退避が作られていない");
 
     // その後にsave.jsonが壊れ、破損退避が走る
@@ -1377,23 +1377,23 @@ fn test_save_json_huge_talk_jitter_does_not_crash_init() {
     fn test_panic_flag_triggers_backup_on_save() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
         let mut m = IndexMap::new();
         m.insert("x".to_string(), Value::Number(1.0));
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
         PANICKED.store(false, Ordering::Relaxed);
-        save_globals(&gen, dir.path()).expect("1回目のsave失敗");
+        save_globals(&cg, dir.path()).expect("1回目のsave失敗");
         assert!(!dir.path().join("save.json.panic.bak").exists(), "パニックしていないのにbakが作られている");
 
         // 値を変えてから、パニック済みの状態で保存
-        gen.env.globals.insert("save".to_string(), Value::Map({
+        cg.env.globals.insert("save".to_string(), Value::Map({
             let mut m = IndexMap::new();
             m.insert("x".to_string(), Value::Number(2.0));
             m
         }));
         PANICKED.store(true, Ordering::Relaxed);
-        save_globals(&gen, dir.path()).expect("2回目のsave失敗");
+        save_globals(&cg, dir.path()).expect("2回目のsave失敗");
 
         assert!(dir.path().join("save.json.panic.bak").exists(), "パニック後の保存でbakが作られていない");
         let bak = std::fs::read_to_string(dir.path().join("save.json.panic.bak")).unwrap();
@@ -1408,13 +1408,13 @@ fn test_save_json_huge_talk_jitter_does_not_crash_init() {
     fn test_backup_skipped_when_no_existing_save() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
-        let mut gen = make_gen();
+        let mut cg = make_gen();
         let mut m = IndexMap::new();
         m.insert("x".to_string(), Value::Number(1.0));
-        gen.env.globals.insert("save".to_string(), Value::Map(m));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
 
         PANICKED.store(true, Ordering::Relaxed);
-        save_globals(&gen, dir.path()).expect("save失敗");
+        save_globals(&cg, dir.path()).expect("save失敗");
         assert!(!dir.path().join("save.json.panic.bak").exists(), "退避元が無いのにbakが作られている");
 
         PANICKED.store(false, Ordering::Relaxed);

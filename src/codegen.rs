@@ -2279,9 +2279,9 @@ OnBoot => {
     湊: ${save.訪問回数}回目だね。
 }"#;
         let talks = parse_talks(src);
-        let mut gen = make_gen();
-        gen.env.globals.insert("save".to_string(), Value::Map({ let mut m = IndexMap::new(); m.insert("訪問回数".to_string(), Value::Number(2.0)); m }));
-        let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+        let mut cg = make_gen();
+        cg.env.globals.insert("save".to_string(), Value::Map({ let mut m = IndexMap::new(); m.insert("訪問回数".to_string(), Value::Number(2.0)); m }));
+        let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
         assert_eq!(out, "\\03回目だね。\\e");
     }
 
@@ -2296,9 +2296,9 @@ OnBoot => {
     }
 }"#;
         let talks = parse_talks(src);
-        let mut gen = make_gen();
-        gen.env.globals.insert("save".to_string(), Value::Map({ let mut m = IndexMap::new(); m.insert("好感度".to_string(), Value::Number(10.0)); m }));
-        let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+        let mut cg = make_gen();
+        cg.env.globals.insert("save".to_string(), Value::Map({ let mut m = IndexMap::new(); m.insert("好感度".to_string(), Value::Number(10.0)); m }));
+        let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
         assert_eq!(out, "\\0また会えたね。\\e");
     }
 
@@ -2339,10 +2339,10 @@ OnBoot => {
     湊: ${1 / 0 ?? "ゼロ除算"}。
 }"#;
         let talks = parse_talks(src);
-        let mut gen = make_gen();
-        let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+        let mut cg = make_gen();
+        let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
         assert_eq!(out, "\\0ゼロ除算。\\e");
-        assert!(gen.errors.iter().any(|(l, _)| l == "warning"));
+        assert!(cg.errors.iter().any(|(l, _)| l == "warning"));
     }
 
     #[test]
@@ -2460,10 +2460,10 @@ OnRandomTalk => {
 }
 "#;
         let talks = parse_talks(src);
-        let mut gen = make_gen();
+        let mut cg = make_gen();
         // gen_event 経由で全候補をフィルタ
         let all: Vec<Talk> = talks.clone();
-        let out = gen.gen_event("OnRandomTalk", &all, &HashMap::new(), FIXED_TIME).unwrap();
+        let out = cg.gen_event("OnRandomTalk", &all, &HashMap::new(), FIXED_TIME).unwrap();
         assert_eq!(out, "\\0こちらが選ばれる。\\e");
     }
     #[test]
@@ -2478,8 +2478,8 @@ fn test_talk_exists_true() {
     let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
     talk_map.insert("OnBoot".to_string(), talks.clone());
 
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0true\\e");
 }
 
@@ -2511,11 +2511,11 @@ OnChoiceSelect => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
     let choice_talk = talks.iter().find(|t| t.event == "OnChoiceSelect").unwrap();
     let mut refs = HashMap::new();
     refs.insert("0".to_string(), "target_talk".to_string());
-    let out = gen.gen_talk(choice_talk, &refs, FIXED_TIME);
+    let out = cg.gen_talk(choice_talk, &refs, FIXED_TIME);
     assert_eq!(out, "\\0呼ばれた。\\e");
 }
 #[test]
@@ -2553,11 +2553,11 @@ OnBoot => {
     }
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
+    let mut cg = make_gen();
     let all: Vec<Talk> = talks.clone();
-    let result = gen.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME);
+    let result = cg.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME);
     assert!(result.is_none());
-    assert!(gen.errors.iter().any(|(level, msg)| level == "notice" && msg.contains("出力が空")));
+    assert!(cg.errors.iter().any(|(level, msg)| level == "notice" && msg.contains("出力が空")));
 }
 
 
@@ -2581,9 +2581,9 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
 
     // 151回 call しているので「呼ばれた」も151回出るはず
     assert_eq!(out.matches("呼ばれた").count(), 151);
@@ -2602,14 +2602,14 @@ fn test_not_and_precedence_functional() {
     }
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    gen.env.globals.insert("save".to_string(), Value::Map({
+    let mut cg = make_gen();
+    cg.env.globals.insert("save".to_string(), Value::Map({
         let mut m = IndexMap::new();
         m.insert("flag".to_string(), Value::Bool(false));
         m.insert("other".to_string(), Value::Bool(false));
         m
     }));
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
 
     // 正しい優先順位: (!flag) && other = true && false = false → else(B)
     // 旧cond_exprのバグ: !(flag && other) = !(false && false) = true → then(A) が誤って選ばれる
@@ -2627,11 +2627,11 @@ fn test_dotted_assign_updates_local_not_global() {
     湊: ${m.a}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\02\\e");
     // 修正前バグ: ここでglobals.mに偽物のMapができてしまっていた
-    assert!(gen.env.globals.get("m").is_none());
+    assert!(cg.env.globals.get("m").is_none());
 }
 #[test]
 fn test_not_binds_looser_than_index() {
@@ -2747,11 +2747,11 @@ fn test_global_keyword_still_bypasses_local_scope() {
     湊: ${m.a}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     // ローカルmはlet時のまま（globalは別名前空間として上書きするだけ）
     assert_eq!(out, "\\01\\e");
-    match gen.env.globals.get("m") {
+    match cg.env.globals.get("m") {
         Some(Value::Map(m)) => assert_eq!(m["a"].as_number(), 99.0),
         other => panic!("globals.mが更新されているべき: {:?}", other),
     }
@@ -2765,10 +2765,10 @@ fn test_dotted_assign_without_local_shadow_still_reaches_globals() {
     湊: ${save.count}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\05\\e");
-    match gen.env.globals.get("save") {
+    match cg.env.globals.get("save") {
         Some(Value::Map(m)) => assert_eq!(m["count"].as_number(), 5.0),
         other => panic!("globals.saveが更新されているべき: {:?}", other),
     }
@@ -2827,8 +2827,8 @@ fn test_choose_unchosen_branch_never_evaluated() {
     湊: ${picked}/${save.calls}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     // condがfalseなのでbump()は一度も呼ばれない。save.callsは0のまま。
     assert_eq!(out, "\\099/0\\e");
 }
@@ -2845,8 +2845,8 @@ fn test_choose_chosen_branch_evaluated_exactly_once() {
     湊: ${picked}/${save.calls}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     // condがtrueなのでbump()は正確に1回だけ呼ばれる。
     assert_eq!(out, "\\01/1\\e");
 }
@@ -2882,9 +2882,9 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\01/\\e");
 }
 #[test]
@@ -3069,12 +3069,12 @@ fn test_for_loop_limit_records_warning() {
     湊: おわり
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0おわり\\e");
     assert!(
-        gen.errors.iter().any(|(level, msg)| level == "warning" && msg.contains("ループ上限")),
-        "ループ上限の警告が記録されていない: {:?}", gen.errors
+        cg.errors.iter().any(|(level, msg)| level == "warning" && msg.contains("ループ上限")),
+        "ループ上限の警告が記録されていない: {:?}", cg.errors
     );
 }
 
@@ -3088,12 +3088,12 @@ fn test_while_loop_limit_records_warning() {
     湊: おわり
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0おわり\\e");
     assert!(
-        gen.errors.iter().any(|(level, msg)| level == "warning" && msg.contains("ループ上限")),
-        "ループ上限の警告が記録されていない: {:?}", gen.errors
+        cg.errors.iter().any(|(level, msg)| level == "warning" && msg.contains("ループ上限")),
+        "ループ上限の警告が記録されていない: {:?}", cg.errors
     );
 }
 #[test]
@@ -3106,16 +3106,16 @@ fn test_foreach_over_limit_array_records_warning() {
     湊: ${total}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
+    let mut cg = make_gen();
     // Rust側で直接2001要素の配列をglobalsに注入する
     let big: Vec<Value> = (0..2001).map(|i| Value::Number(i as f64)).collect();
-    gen.env.globals.insert("big_array".to_string(), Value::Array(big));
+    cg.env.globals.insert("big_array".to_string(), Value::Array(big));
 
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\02000\\e"); // 2000件で打ち切られるのでtotalは2000
     assert!(
-        gen.errors.iter().any(|(level, msg)| level == "warning" && msg.contains("ループ上限")),
-        "foreachのループ上限警告が記録されていない: {:?}", gen.errors
+        cg.errors.iter().any(|(level, msg)| level == "warning" && msg.contains("ループ上限")),
+        "foreachのループ上限警告が記録されていない: {:?}", cg.errors
     );
 }
 
@@ -3127,12 +3127,12 @@ fn test_no_warning_when_loop_finishes_normally() {
     湊: おわり
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0おわり\\e");
     assert!(
-        !gen.errors.iter().any(|(_, msg)| msg.contains("ループ上限")),
-        "正常終了したループなのに警告が出ている: {:?}", gen.errors
+        !cg.errors.iter().any(|(_, msg)| msg.contains("ループ上限")),
+        "正常終了したループなのに警告が出ている: {:?}", cg.errors
     );
 }
 
@@ -3268,9 +3268,9 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0こっちが選ばれる\\e");
 }
 
@@ -3292,9 +3292,9 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0後続は実行される\\e");
 }
 
@@ -3318,9 +3318,9 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0中身\\e");
 }
 
@@ -3333,12 +3333,12 @@ fn test_for_loop_exactly_at_limit_no_warning() {
     湊: おわり
 }}"#, LOOP_LIMIT);
     let talks = parse_talks(&src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0おわり\\e");
     assert!(
-        !gen.errors.iter().any(|(_, msg)| msg.contains("ループ上限")),
-        "ちょうど上限回数で終わる正常なループなのに警告が出ている: {:?}", gen.errors
+        !cg.errors.iter().any(|(_, msg)| msg.contains("ループ上限")),
+        "ちょうど上限回数で終わる正常なループなのに警告が出ている: {:?}", cg.errors
     );
 }
 
@@ -3349,12 +3349,12 @@ fn test_call_depth_resets_at_start_of_gen_event() {
     湊: おわり
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    gen.env.call_depth = 55; // 前回イベントでパニックして残ったかのような状態を模擬
+    let mut cg = make_gen();
+    cg.env.call_depth = 55; // 前回イベントでパニックして残ったかのような状態を模擬
     let all: Vec<Talk> = talks.clone();
-    let out = gen.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
+    let out = cg.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
     assert_eq!(out, "\\0おわり\\e");
-    assert_eq!(gen.env.call_depth, 0);
+    assert_eq!(cg.env.call_depth, 0);
 }
 
 
@@ -3364,17 +3364,17 @@ fn test_errors_reset_at_start_of_gen_event() {
     湊: おわり
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
+    let mut cg = make_gen();
     // 前回イベントがパニックして残ったかのようなエラーを模擬
-    gen.errors.push(("warning".to_string(), "前回の残骸".to_string()));
+    cg.errors.push(("warning".to_string(), "前回の残骸".to_string()));
 
     let all: Vec<Talk> = talks.clone();
-    let out = gen.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
+    let out = cg.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
 
     assert_eq!(out, "\\0おわり\\e");
     assert!(
-        !gen.errors.iter().any(|(_, m)| m.contains("前回の残骸")),
-        "前回イベントのエラーが持ち越されている: {:?}", gen.errors
+        !cg.errors.iter().any(|(_, m)| m.contains("前回の残骸")),
+        "前回イベントのエラーが持ち越されている: {:?}", cg.errors
     );
 }
 
@@ -3386,10 +3386,10 @@ fn test_get_array_out_of_range_returns_default_no_warning() {
     湊: ${get(items, 0, 'なし')}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0なし\\e");
-    assert!(gen.errors.is_empty(), "getは警告を出さないはず: {:?}", gen.errors);
+    assert!(cg.errors.is_empty(), "getは警告を出さないはず: {:?}", cg.errors);
 }
 
 #[test]
@@ -3425,15 +3425,15 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
 
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
 
     assert_eq!(out, "\\0こっち\\e");
     assert!(
-        gen.errors.iter().any(|(l, _)| l == "error"),
-        "cond内のsaoriロード失敗が握りつぶされている: {:?}", gen.errors
+        cg.errors.iter().any(|(l, _)| l == "error"),
+        "cond内のsaoriロード失敗が握りつぶされている: {:?}", cg.errors
     );
 }
 
@@ -3445,12 +3445,12 @@ fn test_saori_absolute_path_is_denied() {
     湊: [${saori('C:\\evil.dll')}]
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0[]\\e");
     assert!(
-        gen.errors.iter().any(|(l, m)| l == "error" && m.contains("絶対パス") || l == "error" && m.contains("ドライブ")),
-        "絶対パスのDLLが拒否されていない: {:?}", gen.errors
+        cg.errors.iter().any(|(l, m)| l == "error" && m.contains("絶対パス") || l == "error" && m.contains("ドライブ")),
+        "絶対パスのDLLが拒否されていない: {:?}", cg.errors
     );
 }
 
@@ -3460,12 +3460,12 @@ fn test_saori_parent_traversal_is_denied() {
     湊: [${saori('../../evil.dll')}]
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0[]\\e");
     assert!(
-        gen.errors.iter().any(|(l, m)| l == "error" && m.contains("..")),
-        "親ディレクトリ参照が拒否されていない: {:?}", gen.errors
+        cg.errors.iter().any(|(l, m)| l == "error" && m.contains("..")),
+        "親ディレクトリ参照が拒否されていない: {:?}", cg.errors
     );
 }
 
@@ -3476,10 +3476,10 @@ fn test_get_map_missing_key_returns_default() {
     湊: ${get(m, 'b', 'なし')}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    let out = gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0なし\\e");
-    assert!(gen.errors.is_empty());
+    assert!(cg.errors.is_empty());
 }
 
 #[test]
@@ -3528,28 +3528,28 @@ fn test_locals_reset_at_start_of_gen_event() {
     湊: ${save.x}
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
-    gen.env.globals.insert("save".to_string(), Value::Map({
+    let mut cg = make_gen();
+    cg.env.globals.insert("save".to_string(), Value::Map({
         let mut m = IndexMap::new();
         m.insert("x".to_string(), Value::Str("グローバル".to_string()));
         m
     }));
 
     // 前回イベントがパニックして残ったかのようなローカルスコープを模擬
-    gen.env.push_scope();
-    gen.env.set_local("save", Value::Map({
+    cg.env.push_scope();
+    cg.env.set_local("save", Value::Map({
         let mut m = IndexMap::new();
         m.insert("x".to_string(), Value::Str("残骸".to_string()));
         m
     }));
 
     let all: Vec<Talk> = talks.clone();
-    let out = gen.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
+    let out = cg.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
 
     // 残骸のローカルがglobalsをシャドウしていないこと
     assert_eq!(out, "\\0グローバル\\e");
     // スコープが積み上がっていないこと（ベース1枚だけ）
-    assert_eq!(gen.env.locals.len(), 1, "ローカルスコープが残っている");
+    assert_eq!(cg.env.locals.len(), 1, "ローカルスコープが残っている");
 }
 
 #[test]
@@ -3558,12 +3558,12 @@ fn test_scope_depth_does_not_grow_across_events() {
     湊: おわり
 }"#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
+    let mut cg = make_gen();
     let all: Vec<Talk> = talks.clone();
     for _ in 0..10 {
-        gen.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
+        cg.gen_event("OnBoot", &all, &HashMap::new(), FIXED_TIME).unwrap();
     }
-    assert_eq!(gen.env.locals.len(), 1);
+    assert_eq!(cg.env.locals.len(), 1);
 }
 
 #[test]
@@ -3586,16 +3586,16 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
-    gen.env.globals.insert("save".to_string(), Value::Map(IndexMap::new()));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
+    cg.env.globals.insert("save".to_string(), Value::Map(IndexMap::new()));
 
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
 
     assert_eq!(out, "\\0こっち\\e");
     assert!(
-        gen.errors.is_empty(),
-        "cond評価の副作用エラーが残っている: {:?}", gen.errors
+        cg.errors.is_empty(),
+        "cond評価の副作用エラーが残っている: {:?}", cg.errors
     );
 }
 
@@ -3619,16 +3619,16 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
-    gen.env.globals.insert("save".to_string(), Value::Map(IndexMap::new()));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
+    cg.env.globals.insert("save".to_string(), Value::Map(IndexMap::new()));
 
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
 
     assert_eq!(out, "\\0ゼロ除算\\e");
     assert!(
-        gen.errors.iter().any(|(l, m)| l == "warning" && m.contains("ゼロ除算")),
-        "本体実行中のエラーまで捨てられている: {:?}", gen.errors
+        cg.errors.iter().any(|(l, m)| l == "warning" && m.contains("ゼロ除算")),
+        "本体実行中のエラーまで捨てられている: {:?}", cg.errors
     );
 }
 
@@ -3650,14 +3650,14 @@ OnBoot => {
     for t in &talks {
         talk_map.entry(t.event.clone()).or_default().push(t.clone());
     }
-    let mut gen = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
     let boot_talk = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-    let out = gen.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
+    let out = cg.gen_talk(boot_talk, &HashMap::new(), FIXED_TIME);
 
     assert_eq!(out, "\\0後続は実行される\\e");
     assert!(
-        gen.errors.iter().any(|(l, m)| l == "notice" && m.contains("target_talk")),
-        "call全滅のnoticeが記録されていない: {:?}", gen.errors
+        cg.errors.iter().any(|(l, m)| l == "notice" && m.contains("target_talk")),
+        "call全滅のnoticeが記録されていない: {:?}", cg.errors
     );
 }
 
@@ -3671,14 +3671,14 @@ OnRandomTalk if(false) => {
 }
 "#;
     let talks = parse_talks(src);
-    let mut gen = make_gen();
+    let mut cg = make_gen();
     let all: Vec<Talk> = talks.clone();
-    let result = gen.gen_event("OnRandomTalk", &all, &HashMap::new(), FIXED_TIME);
+    let result = cg.gen_event("OnRandomTalk", &all, &HashMap::new(), FIXED_TIME);
 
     assert!(result.is_none());
     assert!(
-        gen.errors.is_empty(),
-        "イベント全滅で余計なnoticeが出ている: {:?}", gen.errors
+        cg.errors.is_empty(),
+        "イベント全滅で余計なnoticeが出ている: {:?}", cg.errors
     );
 }
 
@@ -3696,9 +3696,9 @@ OnRandomTalk if(false) => {
         Codegen::new(chars, HashMap::new(), master.to_path_buf())
     }
 
-    fn run_in(gen: &mut Codegen, src: &str) -> String {
+    fn run_in(cg: &mut Codegen, src: &str) -> String {
         let talks = parse_talks(src);
-        gen.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME)
+        cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME)
     }
 
 
@@ -3716,8 +3716,8 @@ OnRandomTalk if(false) => {
             return;
         }
 
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_write('ghost/master/link.txt', '書き換え')}
 }"#);
         assert_eq!(out, "\\0false\\e");
@@ -3726,20 +3726,20 @@ OnRandomTalk if(false) => {
     #[test]
     fn test_file_write_then_read_roundtrip() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     let ok = file_write('ghost/master/memo.txt', 'こんにちは')
     湊: ${ok}/${file_read('ghost/master/memo.txt')}
 }"#);
         assert_eq!(out, "\\0true/こんにちは\\e");
-        assert!(gen.errors.is_empty(), "{:?}", gen.errors);
+        assert!(cg.errors.is_empty(), "{:?}", cg.errors);
     }
 
     #[test]
     fn test_file_write_leaves_no_tmp() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        run_in(&mut cg, r#"OnBoot => {
     let ok = file_write('ghost/master/memo.txt', 'x')
     湊: ${ok}
 }"#);
@@ -3749,12 +3749,12 @@ OnRandomTalk if(false) => {
     #[test]
     fn test_file_write_to_config_is_denied_as_error() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_write('ghost/master/config.toml', 'x')}
 }"#);
         assert_eq!(out, "\\0false\\e");
-        assert!(gen.errors.iter().any(|(l, _)| l == "error"), "{:?}", gen.errors);
+        assert!(cg.errors.iter().any(|(l, _)| l == "error"), "{:?}", cg.errors);
         assert!(!master.join("config.toml").exists(), "禁止パスに書けてしまっている");
     }
 
@@ -3762,8 +3762,8 @@ OnRandomTalk if(false) => {
     fn test_file_write_to_talks_is_denied() {
         let (_home, master) = make_ghost_home();
         std::fs::create_dir_all(master.join("talks")).unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_write('ghost/master/talks/main.mnt', 'x')}
 }"#);
         assert_eq!(out, "\\0false\\e");
@@ -3773,8 +3773,8 @@ OnRandomTalk if(false) => {
     #[test]
     fn test_file_write_to_minato_log_is_denied() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_write('ghost/master/minato_load.log', 'x')}
 }"#);
         assert_eq!(out, "\\0false\\e");
@@ -3785,12 +3785,12 @@ OnRandomTalk if(false) => {
     fn test_file_write_outside_master_is_denied() {
         let (home, master) = make_ghost_home();
         std::fs::create_dir_all(home.path().join("shell").join("master")).unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_write('shell/master/menu_background.png', 'x')}
 }"#);
         assert_eq!(out, "\\0false\\e");
-        assert!(gen.errors.iter().any(|(l, _)| l == "error"));
+        assert!(cg.errors.iter().any(|(l, _)| l == "error"));
     }
 
     #[test]
@@ -3798,8 +3798,8 @@ OnRandomTalk if(false) => {
         let (home, master) = make_ghost_home();
         std::fs::create_dir_all(home.path().join("shell").join("master")).unwrap();
         std::fs::write(home.path().join("shell").join("master").join("descript.txt"), "charset,UTF-8").unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_read('shell/master/descript.txt')}
 }"#);
         assert_eq!(out, "\\0charset,UTF-8\\e");
@@ -3809,8 +3809,8 @@ OnRandomTalk if(false) => {
     fn test_file_read_config_is_allowed() {
         let (_home, master) = make_ghost_home();
         std::fs::write(master.join("config.toml"), "ok").unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_read('ghost/master/config.toml')}
 }"#);
         assert_eq!(out, "\\0ok\\e");
@@ -3819,30 +3819,30 @@ OnRandomTalk if(false) => {
     #[test]
     fn test_parent_traversal_is_denied() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: [${file_read('../../../secret.txt')}]
 }"#);
         assert_eq!(out, "\\0[]\\e");
-        assert!(gen.errors.iter().any(|(l, m)| l == "error" && m.contains("..")), "{:?}", gen.errors);
+        assert!(cg.errors.iter().any(|(l, m)| l == "error" && m.contains("..")), "{:?}", cg.errors);
     }
 
     #[test]
     fn test_absolute_path_is_denied() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: [${file_read('C:\\Windows\\System32\\drivers\\etc\\hosts')}]
 }"#);
         assert_eq!(out, "\\0[]\\e");
-        assert!(gen.errors.iter().any(|(l, _)| l == "error"));
+        assert!(cg.errors.iter().any(|(l, _)| l == "error"));
     }
 
     #[test]
     fn test_reserved_name_is_denied() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_write('ghost/master/NUL.txt', 'x')}
 }"#);
         assert_eq!(out, "\\0false\\e");
@@ -3851,20 +3851,20 @@ OnRandomTalk if(false) => {
     #[test]
     fn test_file_read_missing_returns_null_with_warning() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_read('ghost/master/ない.txt') ?? 'なし'}
 }"#);
         assert_eq!(out, "\\0なし\\e");
-        assert!(gen.errors.iter().any(|(l, _)| l == "warning"), "{:?}", gen.errors);
-        assert!(!gen.errors.iter().any(|(l, _)| l == "error"), "存在しないだけでerrorにしている");
+        assert!(cg.errors.iter().any(|(l, _)| l == "warning"), "{:?}", cg.errors);
+        assert!(!cg.errors.iter().any(|(l, _)| l == "error"), "存在しないだけでerrorにしている");
     }
 
     #[test]
     fn test_file_write_missing_parent_fails() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_write('ghost/master/ないフォルダ/x.txt', 'x')}
 }"#);
         assert_eq!(out, "\\0false\\e");
@@ -3874,8 +3874,8 @@ OnRandomTalk if(false) => {
     #[test]
     fn test_file_append_accumulates() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     file_append('ghost/master/log.txt', 'あ')
     file_append('ghost/master/log.txt', 'い')
     湊: ${file_read('ghost/master/log.txt')}
@@ -3888,8 +3888,8 @@ OnRandomTalk if(false) => {
         let (_home, master) = make_ghost_home();
         std::fs::write(master.join("a.txt"), "A").unwrap();
         std::fs::write(master.join("b.txt"), "B").unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_move('ghost/master/a.txt', 'ghost/master/b.txt')}
 }"#);
         assert_eq!(out, "\\0false\\e");
@@ -3902,8 +3902,8 @@ OnRandomTalk if(false) => {
         let (_home, master) = make_ghost_home();
         std::fs::write(master.join("a.txt"), "A").unwrap();
         std::fs::write(master.join("b.txt"), "B").unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_move('ghost/master/a.txt', 'ghost/master/b.txt', true)}
 }"#);
         assert_eq!(out, "\\0true\\e");
@@ -3916,8 +3916,8 @@ OnRandomTalk if(false) => {
         let (_home, master) = make_ghost_home();
         std::fs::create_dir_all(master.join("talks")).unwrap();
         std::fs::write(master.join("a.mnt"), "OnBoot => {}").unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_move('ghost/master/a.mnt', 'ghost/master/talks/a.mnt')}
 }"#);
         assert_eq!(out, "\\0false\\e");
@@ -3927,8 +3927,8 @@ OnRandomTalk if(false) => {
 fn test_file_move_same_file_case_difference_is_allowed() {
     let (_home, master) = make_ghost_home();
     std::fs::write(master.join("a.txt"), "A").unwrap();
-    let mut gen = make_file_gen(&master);
-    let out = run_in(&mut gen, r#"OnBoot => {
+    let mut cg = make_file_gen(&master);
+    let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_move('ghost/master/a.txt', 'ghost/master/A.TXT')}
 }"#);
     assert_eq!(out, "\\0true\\e");
@@ -3937,8 +3937,8 @@ fn test_file_move_same_file_case_difference_is_allowed() {
     #[test]
     fn test_sjis_roundtrip() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     file_write('ghost/master/sj.txt', '日本語', 'sjis')
     湊: ${file_read('ghost/master/sj.txt', 'sjis')}
 }"#);
@@ -3948,8 +3948,8 @@ fn test_file_move_same_file_case_difference_is_allowed() {
     #[test]
     fn test_sjis_file_read_as_utf8_returns_null() {
         let (_home, master) = make_ghost_home();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     file_write('ghost/master/sj.txt', '日本語', 'sjis')
     湊: ${file_read('ghost/master/sj.txt') ?? '読めない'}
 }"#);
@@ -3961,8 +3961,8 @@ fn test_file_move_same_file_case_difference_is_allowed() {
         let (_home, master) = make_ghost_home();
         let big = "a".repeat((FILE_READ_LIMIT as usize) + 10);
         std::fs::write(master.join("big.txt"), &big).unwrap();
-        let mut gen = make_file_gen(&master);
-        let out = run_in(&mut gen, r#"OnBoot => {
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
     湊: ${file_read('ghost/master/big.txt') ?? '大きすぎ'}
 }"#);
         assert_eq!(out, "\\0大きすぎ\\e");
@@ -3973,9 +3973,9 @@ fn test_file_move_same_file_case_difference_is_allowed() {
         // ghost/master 構成でないディレクトリを渡したとき、
         // 親を辿ってサンドボックスが広がっていないこと
         let dir = tempfile::tempdir().unwrap();
-        let gen = make_file_gen(dir.path());
+        let cg = make_file_gen(dir.path());
         let canonical = dir.path().canonicalize().unwrap();
-        assert_eq!(gen.home_root, canonical, "ghost/master構成でないのに親へ上っている");
+        assert_eq!(cg.home_root, canonical, "ghost/master構成でないのに親へ上っている");
     }
 
     #[test]
@@ -4001,11 +4001,11 @@ OnBoot => {
         for t in &talks {
             talk_map.entry(t.event.clone()).or_default().push(t.clone());
         }
-        let mut gen = Codegen::new(chars, talk_map, master.clone());
+        let mut cg = Codegen::new(chars, talk_map, master.clone());
         let boot = talks.iter().find(|t| t.event == "OnBoot").unwrap();
-        let out = gen.gen_talk(boot, &HashMap::new(), FIXED_TIME);
+        let out = cg.gen_talk(boot, &HashMap::new(), FIXED_TIME);
         assert_eq!(out, "\\0こっち\\e");
-        assert!(gen.errors.iter().any(|(l, _)| l == "error"), "{:?}", gen.errors);
+        assert!(cg.errors.iter().any(|(l, _)| l == "error"), "{:?}", cg.errors);
     }
 
 }
