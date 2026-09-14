@@ -975,7 +975,14 @@ pub struct Codegen {
     pub selector: TalkSelector,
     pub errors: Vec<(String, String)>,
     pub ghost_dir: PathBuf,
-    pub saori_cache: HashMap<String, crate::saori::SaoriDll>,
+    /// ロード済みSAORI DLLのキャッシュ。IndexMapの挿入順を
+    /// 「最近使った順」に保つLRUとして使う（先頭=最古、末尾=最新）。
+    /// SAORI_CACHE_LIMITを超えたら先頭からshift_remove_indexし、
+    /// SaoriDllのDropでFreeLibrary/unloadが呼ばれてDLLも解放される。
+    /// 上限が無いと、台本がdll名を動的に組み立てて毎回異なる文字列を
+    /// 渡すようなケースで、呼び出しのたびにDLLがロードされっぱなしになり
+    /// 長時間稼働で無視できないメモリ・ハンドルリークになる。
+    pub saori_cache: IndexMap<String, crate::saori::SaoriDll>,
         /// サンドボックスの根（ゴーストのホーム）。canonical済み。
     /// starts_withでの比較は両辺がcanonicalでないと意味がないため、
     /// ここだけは正規化した形で持つ。
@@ -997,6 +1004,10 @@ const LOOP_LIMIT: usize = 2000;
 /// panic=unwindでも捕まえられない）。LOOP_LIMITやFILE_READ_LIMIT
 /// 同様、辞書由来の値は必ずクランプする。
 const FORMAT_MAX_WIDTH: usize = 1000;
+/// saori_cacheに同時に保持するSAORI DLLの最大数。
+/// 通常の台本は数個の固定dll名しか使わないため十分な余裕を持たせつつ、
+/// 動的に生成されたdll名が際限なく増えても頭打ちにする。
+const SAORI_CACHE_LIMIT: usize = 32;
 
 enum FlowControl {
     Return(Value),
@@ -1014,7 +1025,7 @@ impl Codegen {
             selector: TalkSelector::new(),
             errors: vec![],
             ghost_dir,
-            saori_cache: HashMap::new(),
+            saori_cache: IndexMap::new(),
             home_root,
                 spoken_scopes:HashSet::new(),
     current_scope: None,
@@ -1512,7 +1523,11 @@ else {
     if vals.is_empty() { return Value::Str(String::new()); }
     let dll_name = vals[0].to_display();
     let args: Vec<String> = vals[1..].iter().map(|v| v.to_display()).collect();
-    if !self.saori_cache.contains_key(&dll_name) {
+    if let Some(idx) = self.saori_cache.get_index_of(&dll_name) {
+        // LRU: 使ったエントリを末尾（最新）に移動する
+        let last = self.saori_cache.len() - 1;
+        self.saori_cache.move_index(idx, last);
+    } else {
         // joinは右辺が絶対パスだと左辺を捨てるため、
         // 検査しないと saori('C:\\evil.dll') がそのまま読み込まれる。
         // 基準はhome_rootではなくghost_dir（既存台本が
@@ -1527,7 +1542,16 @@ else {
         let mut dll_path = self.ghost_dir.clone();
         for s in &segs { dll_path.push(s); }
         match crate::saori::SaoriDll::load(&dll_path) {
-            Ok(dll) => { self.saori_cache.insert(dll_name.clone(), dll); }
+            Ok(dll) => {
+                if self.saori_cache.len() >= SAORI_CACHE_LIMIT {
+                    // 先頭（最も長く使われていない）を追い出す。
+                    // shift_removeでDrop（unload_fn + FreeLibrary）が走る。
+                    if let Some((evicted_name, _)) = self.saori_cache.shift_remove_index(0) {
+                        append_log!(format!("saori_cache上限到達、追い出し: {}", evicted_name));
+                    }
+                }
+                self.saori_cache.insert(dll_name.clone(), dll);
+            }
             Err(e)  => {
                 append_log!(format!("saori load failed: {}: {}", dll_name, e));
                 self.errors.push(("error".to_string(), e));
