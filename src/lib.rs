@@ -313,7 +313,8 @@ fn load_program_guarded(
     PANICKED.store(false, Ordering::Relaxed);
 
     // LOG_DIR を ghost_dir に設定
-    if let Ok(mut d) = LOG_DIR.lock() {
+    {
+        let mut d = lock_log_dir();
         *d = dir.to_path_buf();
     }
     let config_path = dir.join("config.toml");
@@ -1008,6 +1009,15 @@ fn lock_state() -> std::sync::MutexGuard<'static, Option<ManatoState>> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// LOG_DIRのロックを取得する。lock_stateと同じ理由でpoisonを無視して回復する。
+/// 以前はappend_log!マクロが`if let Ok(d) = LOG_DIR.lock()`で握り潰していたため、
+/// LOG_DIRを保持している間に一度でもpanicが起きてpoisonされると、
+/// 以後プロセス寿命の間ずっとログが黙って出力されなくなっていた
+/// （中身のPathBuf自体は壊れておらず、回復して問題ない）。
+pub(crate) fn lock_log_dir() -> std::sync::MutexGuard<'static, PathBuf> {
+    LOG_DIR.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// STATEが既に初期化済みかどうかを判定する。
 /// load()のガード（loaduで初期化済みならloadは無視する）の判定部分を
 /// 切り出したもの。HGLOBALを介さずに直接テストできるようにするため。
@@ -1292,6 +1302,39 @@ fn test_is_already_initialized_reflects_state() {
     assert!(is_already_initialized(), "STATEに値があるのにfalseを返している");
 
     if let Ok(mut s) = STATE.lock() { *s = None; }
+}
+
+#[test]
+fn test_lock_log_dir_recovers_after_poison() {
+    // LOG_DIRを保持したまま別スレッドをわざとpanicさせてpoisonする。
+    // 以前はappend_log!が`if let Ok(d) = LOG_DIR.lock()`で握り潰していたため、
+    // 一度poisonされると以後ずっとログが黙って出なくなっていた。
+    // lock_log_dirはlock_stateと同様にpoisonを無視して回復するべき。
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+    let _ = std::thread::spawn(|| {
+        let _d = super::lock_log_dir();
+        panic!("intentional poison for test_lock_log_dir_recovers_after_poison");
+    }).join();
+
+    // poison後もlock_log_dirで取得でき、中身も読み書きできること
+    {
+        let mut d = super::lock_log_dir();
+        *d = PathBuf::from("poison_recovery_test");
+    }
+    {
+        let d = super::lock_log_dir();
+        assert_eq!(
+            *d, PathBuf::from("poison_recovery_test"),
+            "poison後にLOG_DIRの内容が壊れている/取得できていない"
+        );
+    }
+
+    // 他のテストに影響しないよう既定値に戻しておく
+    {
+        let mut d = super::lock_log_dir();
+        *d = PathBuf::new();
+    }
 }
 
 }

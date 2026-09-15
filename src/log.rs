@@ -10,15 +10,16 @@ macro_rules! append_log {
 
             if should_log {
                 use std::io::Write;
-                if let Ok(d) = $crate::LOG_DIR.lock() {
-                    if !d.as_os_str().is_empty() {
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(d.join("minato_load.log"))
-                        {
-                            let _ = writeln!(f, "{}", $msg);
-                        }
+                // lock_log_dirはpoisonを無視して回復するため、LOG_DIR保持中に
+                // 一度panicが起きても、以後ずっとログが出なくなることはない。
+                let d = $crate::lock_log_dir();
+                if !d.as_os_str().is_empty() {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(d.join("minato_load.log"))
+                    {
+                        let _ = writeln!(f, "{}", $msg);
                     }
                 }
             }
