@@ -14,3 +14,11 @@ Thumbs.db
 # エディタ
 .vscode/
 .claude/
+
+#ブック
+docs/book/
+parser_original.rs
+runtime_original.rs
+lib_original.rs
+codegen_original.rs
+analyzer_oliginal.rs
