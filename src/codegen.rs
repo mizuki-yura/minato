@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};   // ← PathBuf 単独から変更
 use encoding_rs::SHIFT_JIS;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 use crate::parser::{
     AssignOp, CmpOp, Expr, Stmt, StrPart, Talk, Line, BinOp, PathSegment, MatchPattern
 };
@@ -70,6 +72,12 @@ pub struct Env {
     pub characters: HashMap<String, String>,
     pub funcs: HashMap<String, (Vec<String>, Vec<Stmt>)>,
     pub call_depth: usize,
+    /// このイベント処理中にget_property/saoriを呼び出した回数。
+    /// MAX_EXTERNAL_CALLS_PER_EVENTと合わせて使う（consume_external_call_budget参照）。
+    /// eval_expr(&Env版、&mut self不要なアーム用)からも読み書きする必要があるため
+    /// Cellで内部可変性を持たせている。Codegenごと（=Envごと）に独立しており、
+    /// 旧実装のモジュール静的と違いテスト間で状態が漏れない。
+    external_call_count: std::cell::Cell<usize>,
 }
 
 impl Env {
@@ -80,6 +88,7 @@ impl Env {
             characters,
             funcs: HashMap::new(),
             call_depth: 0,
+            external_call_count: std::cell::Cell::new(0),
         }
     }
 
@@ -229,6 +238,7 @@ pub fn set_var_path(&mut self, path: &[PathSegment], op: &AssignOp, val: Value) 
         self.locals.clear();
         self.locals.push(HashMap::new());
         self.call_depth = 0;
+        self.external_call_count.set(0);
     }
 }
 
@@ -572,7 +582,7 @@ pub fn is_builtin(name: &str) -> bool {
 }
 // ── ビルトイン関数 ────────────────────────────────────────
 
-fn call_builtin(name: &str, vals: Vec<Value>) -> Value {
+fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
     match name {
         "floor" => Value::Number(vals.get(0).map(|v| v.as_number().floor()).unwrap_or(0.0)),
         "ceil"  => Value::Number(vals.get(0).map(|v| v.as_number().ceil()).unwrap_or(0.0)),
@@ -825,6 +835,16 @@ fn call_builtin(name: &str, vals: Vec<Value>) -> Value {
         "get_property" => {
             let name = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
             if name.is_empty() { Value::Str(String::new()) }
+            else if !consume_external_call_budget(env) {
+                // ループ内でget_property/saoriを繰り返し呼ぶ台本が、
+                // STATEのMutexを保持したまま実質無制限にSSP全体を
+                // ブロックしないための上限（詳細はMAX_EXTERNAL_CALLS_PER_EVENT参照）。
+                append_log!(format!(
+                    "get_property: 1イベントあたりの外部呼び出し上限（{}回）に達したため無視しました: {}",
+                    MAX_EXTERNAL_CALLS_PER_EVENT, name
+                ));
+                Value::Str(String::new())
+            }
             else { Value::Str(crate::sstp::get_property(&name)) }
         },
         "substr" => match vals.get(0) {
@@ -888,7 +908,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Value {
         Expr::Array(items) => Value::Array(items.iter().map(|e| eval_expr(e, env)).collect()),
         Expr::Call(name, args) => {
             let vals: Vec<Value> = args.iter().map(|a| eval_expr(a, env)).collect();
-            call_builtin(name, vals)
+            call_builtin(name, vals, env)
         }
         Expr::BinOp(lhs, op, rhs) => {
             let l = eval_expr(lhs, env); let r = eval_expr(rhs, env);
@@ -982,7 +1002,18 @@ pub struct Codegen {
     /// 上限が無いと、台本がdll名を動的に組み立てて毎回異なる文字列を
     /// 渡すようなケースで、呼び出しのたびにDLLがロードされっぱなしになり
     /// 長時間稼働で無視できないメモリ・ハンドルリークになる。
-    pub saori_cache: IndexMap<String, crate::saori::SaoriDll>,
+    ///
+    /// Arcで持っているのは、request_with_timeoutがタイムアウトした際に
+    /// バックグラウンドで走り続けるrequest呼び出しがSaoriDllを使い終える
+    /// までDrop（FreeLibrary/unload）を遅らせるため。
+    pub saori_cache: IndexMap<String, Arc<crate::saori::SaoriDll>>,
+    /// request_with_timeoutがタイムアウトしたSAORI DLL名の集合。
+    /// 一度タイムアウトしたDLLは、バックグラウンドに古い呼び出しが
+    /// 取り残されている可能性があるため、このロード期間中は二度と
+    /// 呼び出さない（多くのSAORI実装は複数スレッドからの同時呼び出しを
+    /// 想定していないため）。ゴーストの再読み込み（loadu/load）で
+    /// Codegenごと作り直されるとクリアされる。
+    saori_timed_out: HashSet<String>,
         /// サンドボックスの根（ゴーストのホーム）。canonical済み。
     /// starts_withでの比較は両辺がcanonicalでないと意味がないため、
     /// ここだけは正規化した形で持つ。
@@ -1009,6 +1040,40 @@ const FORMAT_MAX_WIDTH: usize = 1000;
 /// 動的に生成されたdll名が際限なく増えても頭打ちにする。
 const SAORI_CACHE_LIMIT: usize = 32;
 
+/// 1回のSAORI request呼び出しの待ち上限。
+/// STATEのMutexを保持したまま同期でDLLを呼ぶため、ハングしたSAORIが
+/// あってもSSP全体のフリーズを一定時間で打ち切るための上限。
+/// （タイムアウト後もバックグラウンド呼び出し自体は走り続けうる。
+///   詳細はsaori::request_with_timeoutのコメントを参照）
+const SAORI_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 1回のイベント処理（gen_event）中にget_property/saoriを合計で
+/// 呼び出せる回数の上限。
+///
+/// get_propertyは1回あたり最大800ms程度（sstp::CONNECT_TIMEOUT+IO_TIMEOUT）、
+/// saoriは1回あたり最大SAORI_CALL_TIMEOUTブロックしうる。どちらもSTATEの
+/// Mutexを保持したまま呼ばれるため、これらをwhile/for等のループ内で
+/// 繰り返し呼ぶ台本があると、上限が無ければ「1回あたりの上限×ループ回数
+/// （最大LOOP_LIMIT=2000）」までSSP全体をブロックしてしまう。
+/// この上限を設けることで、1イベントあたりの最悪ブロック時間を
+/// 「1回の上限×MAX_EXTERNAL_CALLS_PER_EVENT」に頭打ちにする。
+const MAX_EXTERNAL_CALLS_PER_EVENT: usize = 10;
+
+/// get_property/saoriの呼び出し予算を1消費し、まだ予算内であればtrueを返す。
+/// 予算切れの場合は呼び出し元が副作用（実際のSSTP/SAORI呼び出し）を
+/// 起こさずに空の値を返すこと。
+///
+/// カウンタはEnv側（Codegenインスタンスごと）に持たせている。
+/// call_builtinは`&mut self`を取らない自由関数（condの評価などで使う
+/// &Env版のeval_expr経由でも呼ばれるため）なので、`&Env`だけで
+/// 読み書きできるようCellで持つ。イベント開始時にreset_runtime_stateで
+/// 0に戻る。
+fn consume_external_call_budget(env: &Env) -> bool {
+    let prev = env.external_call_count.get();
+    env.external_call_count.set(prev + 1);
+    prev < MAX_EXTERNAL_CALLS_PER_EVENT
+}
+
 enum FlowControl {
     Return(Value),
     Break,
@@ -1026,6 +1091,7 @@ impl Codegen {
             errors: vec![],
             ghost_dir,
             saori_cache: IndexMap::new(),
+            saori_timed_out: HashSet::new(),
             home_root,
                 spoken_scopes:HashSet::new(),
     current_scope: None,
@@ -1090,7 +1156,7 @@ impl Codegen {
     /// 正常系ではhandle_request側がdrainするので、ここに来る時点で
     /// errorsは既に空であり、挙動は変わらない。
     fn reset_for_event(&mut self) {
-        
+
         self.env.reset_runtime_state();
         self.errors.clear();
          self.spoken_scopes.clear();
@@ -1523,6 +1589,30 @@ else {
     if vals.is_empty() { return Value::Str(String::new()); }
     let dll_name = vals[0].to_display();
     let args: Vec<String> = vals[1..].iter().map(|v| v.to_display()).collect();
+
+    if self.saori_timed_out.contains(&dll_name) {
+        // 一度タイムアウトしたSAORIは、このロード期間中は再呼び出ししない。
+        // バックグラウンドに取り残された古い呼び出しと新しい呼び出しが
+        // 同時に同一DLLのrequest_fnへ入ることを避けるため
+        // （詳細はsaori::request_with_timeout / SaoriDllのSync実装コメント参照）。
+        self.errors.push((
+            "warning".to_string(),
+            format!("SAORI「{}」は以前応答がタイムアウトしたため、このロード期間中は呼び出しを停止しています（ゴーストの再読み込みで復帰します）", dll_name)
+        ));
+        return Value::Array(vec![]);
+    }
+
+    if !consume_external_call_budget(&self.env) {
+        // ループ内でsaori/get_propertyを繰り返し呼ぶ台本が、STATEのMutexを
+        // 保持したまま実質無制限にSSP全体をブロックしないための上限
+        // （詳細はMAX_EXTERNAL_CALLS_PER_EVENT参照）。
+        self.errors.push((
+            "warning".to_string(),
+            format!("1イベントあたりの外部呼び出し上限（{}回）に達したため「{}」の呼び出しを無視しました", MAX_EXTERNAL_CALLS_PER_EVENT, dll_name)
+        ));
+        return Value::Array(vec![]);
+    }
+
     if let Some(idx) = self.saori_cache.get_index_of(&dll_name) {
         // LRU: 使ったエントリを末尾（最新）に移動する
         let last = self.saori_cache.len() - 1;
@@ -1545,12 +1635,13 @@ else {
             Ok(dll) => {
                 if self.saori_cache.len() >= SAORI_CACHE_LIMIT {
                     // 先頭（最も長く使われていない）を追い出す。
-                    // shift_removeでDrop（unload_fn + FreeLibrary）が走る。
+                    // shift_removeでArcの参照が1つ減る。バックグラウンドで
+                    // まだ使用中でなければここでDrop（unload_fn + FreeLibrary）が走る。
                     if let Some((evicted_name, _)) = self.saori_cache.shift_remove_index(0) {
                         append_log!(format!("saori_cache上限到達、追い出し: {}", evicted_name));
                     }
                 }
-                self.saori_cache.insert(dll_name.clone(), dll);
+                self.saori_cache.insert(dll_name.clone(), Arc::new(dll));
             }
             Err(e)  => {
                 append_log!(format!("saori load failed: {}: {}", dll_name, e));
@@ -1559,7 +1650,23 @@ else {
             }
         }
     }
-    let result = self.saori_cache[&dll_name].request(&args);
+    let dll = self.saori_cache[&dll_name].clone();
+    let result = match crate::saori::request_with_timeout(dll, args, SAORI_CALL_TIMEOUT) {
+        Some(r) => r,
+        None => {
+            append_log!(format!("saori request timeout: {}", dll_name));
+            self.errors.push((
+                "warning".to_string(),
+                format!("SAORI「{}」の応答がタイムアウト（{}秒）したため打ち切りました", dll_name, SAORI_CALL_TIMEOUT.as_secs())
+            ));
+            // 以後このロード期間中は呼び出さない。キャッシュからも外し、
+            // 取り残されたバックグラウンド呼び出しがArcを持つ間だけ
+            // DLLの実体を生かしておく。
+            self.saori_timed_out.insert(dll_name.clone());
+            self.saori_cache.shift_remove(&dll_name);
+            HashMap::new()
+        }
+    };
     let mut keys: Vec<usize> = result.keys().filter_map(|k| k.parse().ok()).collect();
     keys.sort();
     Value::Array(keys.iter().map(|k| Value::Str(result.get(&k.to_string()).cloned().unwrap_or_default())).collect())
@@ -1886,7 +1993,7 @@ Some('s') => {
     }
     Value::Str(result)
 }
-                        _ => call_builtin(fname, vals),
+                        _ => call_builtin(fname, vals, &self.env),
                     }
                 }
             }
@@ -3466,6 +3573,97 @@ fn test_saori_parent_traversal_is_denied() {
     assert!(
         cg.errors.iter().any(|(l, m)| l == "error" && m.contains("..")),
         "親ディレクトリ参照が拒否されていない: {:?}", cg.errors
+    );
+}
+
+// ── 外部呼び出し予算（get_property/saoriのループ複利フリーズ対策）────
+
+#[test]
+fn test_external_call_budget_allows_up_to_limit_then_blocks() {
+    // MAX_EXTERNAL_CALLS_PER_EVENT回までは予算内(true)、
+    // それを超えると予算切れ(false)になることを直接確認する。
+    // EnvはCodegenインスタンスごとに独立しているため、
+    // 他のテストと並行実行されても影響し合わない。
+    let env = Env::new(HashMap::new());
+    for i in 0..MAX_EXTERNAL_CALLS_PER_EVENT {
+        assert!(consume_external_call_budget(&env), "呼び出し{}回目は予算内のはず", i + 1);
+    }
+    assert!(!consume_external_call_budget(&env), "上限到達後はfalseになるはず");
+    assert!(!consume_external_call_budget(&env), "予算切れ後は呼ぶたびfalseのままのはず");
+}
+
+#[test]
+fn test_external_call_budget_resets_with_runtime_state() {
+    // gen_event開始時に呼ばれるreset_runtime_stateで予算が復活することの確認。
+    let mut env = Env::new(HashMap::new());
+    for _ in 0..MAX_EXTERNAL_CALLS_PER_EVENT {
+        consume_external_call_budget(&env);
+    }
+    assert!(!consume_external_call_budget(&env));
+
+    env.reset_runtime_state();
+    assert!(consume_external_call_budget(&env), "reset後は予算が復活しているはず");
+}
+
+#[test]
+fn test_saori_loop_calls_are_capped_per_event() {
+    // whileループでSAORIを繰り返し呼んでも、実際にload()を試みる
+    // （=STATEロックを長時間保持しうる）回数はMAX_EXTERNAL_CALLS_PER_EVENTで
+    // 頭打ちになり、それ以降は「予算切れ」の警告に切り替わることを確認する。
+    // 存在しないDLL名を使うことで、本物のload失敗経路（1回ごとにerrorを積む）を
+    // そのまま通しつつテストする。
+    let loop_count = MAX_EXTERNAL_CALLS_PER_EVENT + 20;
+    let src = format!(
+        r#"OnBoot => {{
+    let i = 0
+    while(i < {loop_count}) {{
+        saori('存在しない.dll')
+        i += 1
+    }}
+}}"#
+    );
+    let talks = parse_talks(&src);
+    let mut cg = make_gen();
+    cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+
+    let load_error_count = cg.errors.iter().filter(|(l, _)| l == "error").count();
+    let budget_warning_count = cg.errors.iter()
+        .filter(|(l, m)| l == "warning" && m.contains("外部呼び出し上限"))
+        .count();
+
+    assert_eq!(
+        load_error_count, MAX_EXTERNAL_CALLS_PER_EVENT,
+        "load失敗のerrorがMAX_EXTERNAL_CALLS_PER_EVENTを超えて発生している（ループが予算で頭打ちになっていない）: {:?}", cg.errors
+    );
+    assert_eq!(
+        budget_warning_count, loop_count - MAX_EXTERNAL_CALLS_PER_EVENT,
+        "予算切れ警告の件数が想定と異なる: {:?}", cg.errors
+    );
+}
+
+#[test]
+fn test_get_property_loop_is_capped_per_event() {
+    // whileループでget_propertyを繰り返し呼んでも、Env側のカウンタが
+    // 呼び出し試行の総数を正しく記録することを確認する
+    // （実際にSSTPへ接続を試みるのはこのうちMAX_EXTERNAL_CALLS_PER_EVENT回までで、
+    //  それ以降はconsume_external_call_budgetがfalseを返して即座に空文字を返す）。
+    let loop_count = MAX_EXTERNAL_CALLS_PER_EVENT + 15;
+    let src = format!(
+        r#"OnBoot => {{
+    let i = 0
+    while(i < {loop_count}) {{
+        get_property('name')
+        i += 1
+    }}
+}}"#
+    );
+    let talks = parse_talks(&src);
+    let mut cg = make_gen();
+    cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+
+    assert_eq!(
+        cg.env.external_call_count.get(), loop_count,
+        "呼び出し試行のカウントがループ回数と一致しない"
     );
 }
 

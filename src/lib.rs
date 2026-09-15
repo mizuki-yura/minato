@@ -94,18 +94,30 @@ pub extern "C" fn loadu(h: HGLOBAL, len: c_long) -> i32 {
             return 0;
         }
              {
-            let mut s = lock_state();
-            if s.is_some() {
-                // 既存stateがあれば先に保存してから解放
-                if let Some(state) = s.as_ref() {
-    if !state.load_failed {
-        if let Err(_e) = save_globals(&state.codegen, &state.ghost_dir) {
-            append_log!(format!("save error: {}", _e));
-        }
-    }
-}
-                *s = None;
-                append_log!(format!("loadu: previous state cleared"));
+            // 保存に必要なデータ（globals/ghost_dir）だけロック内で複製し、
+            // 実際のシリアライズ・ファイルI/O(save_globals)はSTATEロックを
+            // 解放してから行う。低速なディスクやネットワークドライブ上の
+            // ゴーストディレクトリ、ウイルススキャン等でI/Oが長引いても、
+            // 他スレッドからの load/unload/request がその間ブロックされ
+            // 続けないようにするため。
+            let mut to_save = None;
+            {
+                let mut s = lock_state();
+                if s.is_some() {
+                    // 既存stateがあれば先に保存対象データを複製してから解放
+                    if let Some(state) = s.as_ref() {
+                        if !state.load_failed {
+                            to_save = Some((state.codegen.env.globals.clone(), state.ghost_dir.clone()));
+                        }
+                    }
+                    *s = None;
+                    append_log!(format!("loadu: previous state cleared"));
+                }
+            }
+            if let Some((globals, ghost_dir)) = to_save {
+                if let Err(_e) = save_globals(&globals, &ghost_dir) {
+                    append_log!(format!("save error: {}", _e));
+                }
             }
         }
         let dir = unsafe {
@@ -183,16 +195,21 @@ pub extern "C" fn load(h: HGLOBAL, len: c_long) -> i32 {
 #[no_mangle]
 pub extern "C" fn unload() -> i32 {
     std::panic::catch_unwind(|| {
-        {
+        // 保存に必要なデータだけロック内で複製し、実際のファイルI/OはSTATE
+        // ロックを解放してから行う（loaduと同じ理由。詳細はloaduのコメント参照）。
+        let to_save = {
             let mut s = lock_state();
-               if let Some(state) = s.as_ref() {
-    if !state.load_failed {
-        if let Err(_e) = save_globals(&state.codegen, &state.ghost_dir) {
-            append_log!(format!("save error: {}", _e));
-        }
-    }
-}
+            let data = s.as_ref().and_then(|state| {
+                if state.load_failed { None }
+                else { Some((state.codegen.env.globals.clone(), state.ghost_dir.clone())) }
+            });
             *s = None;
+            data
+        };
+        if let Some((globals, ghost_dir)) = to_save {
+            if let Err(_e) = save_globals(&globals, &ghost_dir) {
+                append_log!(format!("save error: {}", _e));
+            }
         }
         1
     }).unwrap_or(1)
@@ -540,43 +557,48 @@ fn handle_request(req: &str) -> String {
     let refs = parse_all_references(req);
     let event = parse_event(req);
     append_log!(format!("handle_request: raw event=[{}], req.len={}", event, req.len()));
- 
-if let Some(hwnd_val) = parse_header(req, "HWnd") {
+
+    // HWnd/Statusの反映から本処理まで、1回のロック取得だけで行う。
+    // 以前はHWnd用・Status用・本処理用と3回に分けてlock_state()を
+    // 呼んでおり、その都度ロックを解放していた。SSPが複数スレッドから
+    // 並行してrequestを呼ぶ場合、ブロックの合間に別スレッドの
+    // handle_request全体が丸ごと割り込みうるため、あるリクエストの
+    // gen_event呼び出しが別リクエスト由来のstate.status_raw（status.talking等
+    // の判定に使う）やstate.hwndを読んでしまう競合状態があった。
+    // ロックを1回取得したまま最後まで保持することでこれを無くす。
     let mut s = lock_state();
-    if let Some(state) = s.as_mut() {
-        if let Ok(h) = hwnd_val.parse::<u64>() {
-            state.hwnd = h;
+
+    if let Some(hwnd_val) = parse_header(req, "HWnd") {
+        if let Some(state) = s.as_mut() {
+            if let Ok(h) = hwnd_val.parse::<u64>() {
+                state.hwnd = h;
+            }
         }
     }
-}
-// Statusヘッダは「無い＝その状態ではない」を意味するため、
-// ヘッダが無いリクエストでも必ず上書きする。
-// if let Some(..) にすると前回の値が残り続け、
-// 発話が終わったあとも status.talking が true のままになる。
-{
-    let status_val = parse_header(req, "Status").unwrap_or_default();
-    let mut s = lock_state();
+    // Statusヘッダは「無い＝その状態ではない」を意味するため、
+    // ヘッダが無いリクエストでも必ず上書きする。
+    // if let Some(..) にすると前回の値が残り続け、
+    // 発話が終わったあとも status.talking が true のままになる。
     if let Some(state) = s.as_mut() {
-        state.status_raw = status_val;
+        state.status_raw = parse_header(req, "Status").unwrap_or_default();
     }
-}
 
     // ★変更: On始まりでないID（Resourceリクエスト）のうち、
     //   version/craftmanだけは値を返す。それ以外は従来通り204。
+    // （STATE未初期化でも応答できるよう、下のnot initializedチェックより前に置く）
     if !event.starts_with("On") {
         return match event.as_str() {
             "version" => shiori_resource_response(env!("CARGO_PKG_VERSION")),
-            "craftman" => 
+            "craftman" =>
                 shiori_resource_response("mizuki"),
-            
+
             _ => not_found_response(),
         };
     }
 
     // ...以降は変更なし
-    
 
-    let mut s = lock_state();
+
     let state = match s.as_mut() {
         Some(s) => s,
         None => return error_response("not initialized"),
@@ -836,21 +858,27 @@ fn error_response(msg: &str) -> String {
 
 // ── セーブデータ ──────────────────────────────────────────
 
-fn save_globals(codegen: &Codegen, dir: &Path) -> Result<(), String> {
+/// `globals`はCodegen::env.globalsの複製（またはそれ相当）を渡すこと。
+/// あえて`&Codegen`ではなく`&HashMap<String, Value>`を受け取るのは、
+/// 呼び出し元（loadu/unload）がSTATEロックを保持したままこの関数の
+/// シリアライズ・ファイルI/Oを行わずに済むようにするため。
+/// ロック内で複製するのはglobals（ユーザーのセーブデータ、通常は小さい）
+/// だけでよく、Codegen全体（saori_cache等）を複製・保持する必要が無い。
+fn save_globals(globals: &HashMap<String, Value>, dir: &Path) -> Result<(), String> {
     use std::io::Write;
-    
+
     let mut json_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    
+
     // save.* を保存
-    if let Some(Value::Map(m)) = codegen.env.globals.get("save") {
+    if let Some(Value::Map(m)) = globals.get("save") {
         let save_json: serde_json::Map<String, serde_json::Value> = m.iter()
             .map(|(k, v)| (k.clone(), value_to_json(v)))
             .collect();
         json_map.insert("save".to_string(), serde_json::Value::Object(save_json));
     }
-    
+
     // system.* を保存（読み取り専用項目は除く）
-    if let Some(Value::Map(m)) = codegen.env.globals.get("system") {
+    if let Some(Value::Map(m)) = globals.get("system") {
         let mut system_json: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for key in  PERSISTED_SYSTEM_KEYS {
             if let Some(v) = m.get(*key) {
@@ -1023,7 +1051,7 @@ mod save_load_tests {
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
         // 保存
-        save_globals(&cg, dir.path()).expect("save失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
 
         // 別のCodegenで読み直す
         let mut gen2 = make_gen();
@@ -1053,7 +1081,7 @@ mod save_load_tests {
         m.insert("pi".to_string(),   Value::Number(std::f64::consts::PI));
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&cg, dir.path()).expect("save失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1084,7 +1112,7 @@ mod save_load_tests {
         m.insert("stats".to_string(), Value::Map(stats));
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&cg, dir.path()).expect("save失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1118,7 +1146,7 @@ mod save_load_tests {
         m.insert("履歴".to_string(), arr);
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&cg, dir.path()).expect("save失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1156,7 +1184,7 @@ mod save_load_tests {
         }
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&cg, dir.path()).expect("save失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
 
         let mut gen2 = make_gen();
         load_globals(&mut gen2, dir.path()).expect("load失敗");
@@ -1220,7 +1248,7 @@ mod save_load_tests {
         m.insert("x".to_string(), Value::Number(1.0));
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
-        save_globals(&cg, dir.path()).expect("save失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
 
         // .tmp が残っていないこと
         assert!(!dir.path().join("save.json.tmp").exists(), "tmpファイルが残っている");
@@ -1279,9 +1307,9 @@ fn test_panic_bak_and_corrupt_bak_coexist() {
 
     // パニック退避を作る
     PANICKED.store(false, Ordering::Relaxed);
-    save_globals(&cg, dir.path()).expect("1回目のsave失敗");
+    save_globals(&cg.env.globals, dir.path()).expect("1回目のsave失敗");
     PANICKED.store(true, Ordering::Relaxed);
-    save_globals(&cg, dir.path()).expect("2回目のsave失敗");
+    save_globals(&cg.env.globals, dir.path()).expect("2回目のsave失敗");
     assert!(dir.path().join(PANIC_BAK).exists(), "パニック退避が作られていない");
 
     // その後にsave.jsonが壊れ、破損退避が走る
@@ -1383,7 +1411,7 @@ fn test_save_json_huge_talk_jitter_does_not_crash_init() {
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
         PANICKED.store(false, Ordering::Relaxed);
-        save_globals(&cg, dir.path()).expect("1回目のsave失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("1回目のsave失敗");
         assert!(!dir.path().join("save.json.panic.bak").exists(), "パニックしていないのにbakが作られている");
 
         // 値を変えてから、パニック済みの状態で保存
@@ -1393,7 +1421,7 @@ fn test_save_json_huge_talk_jitter_does_not_crash_init() {
             m
         }));
         PANICKED.store(true, Ordering::Relaxed);
-        save_globals(&cg, dir.path()).expect("2回目のsave失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("2回目のsave失敗");
 
         assert!(dir.path().join("save.json.panic.bak").exists(), "パニック後の保存でbakが作られていない");
         let bak = std::fs::read_to_string(dir.path().join("save.json.panic.bak")).unwrap();
@@ -1414,7 +1442,7 @@ fn test_save_json_huge_talk_jitter_does_not_crash_init() {
         cg.env.globals.insert("save".to_string(), Value::Map(m));
 
         PANICKED.store(true, Ordering::Relaxed);
-        save_globals(&cg, dir.path()).expect("save失敗");
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
         assert!(!dir.path().join("save.json.panic.bak").exists(), "退避元が無いのにbakが作られている");
 
         PANICKED.store(false, Ordering::Relaxed);
@@ -1642,6 +1670,32 @@ fn test_status_header_cleared_when_absent_in_later_request() {
 
     if let Ok(mut s) = STATE.lock() { *s = None; }
 }
+
+#[test]
+fn test_version_and_craftman_respond_without_initialized_state() {
+    // handle_requestはHWnd/Status反映と本処理を1回のロックにまとめて
+    // いるが、version/craftmanのようなOn始まりでないResourceリクエストは
+    // STATEが未初期化（loadu/load前や、unload後）でも応答できる必要がある。
+    // ロック統合時にnot initializedチェックの前後を誤って入れ替えると
+    // ここが壊れる。
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    if let Ok(mut s) = STATE.lock() { *s = None; }
+
+    let version_req = "SEND SHIORI/3.0\r\nID: version\r\nSender: SSP\r\nCharset: UTF-8\r\n\r\n";
+    let res = handle_request(version_req);
+    assert!(res.contains("200 OK"), "STATE未初期化でversionが200を返していない: {}", res);
+    assert!(res.contains(env!("CARGO_PKG_VERSION")), "versionの値が返っていない: {}", res);
+
+    let craftman_req = "SEND SHIORI/3.0\r\nID: craftman\r\nSender: SSP\r\nCharset: UTF-8\r\n\r\n";
+    let res = handle_request(craftman_req);
+    assert!(res.contains("200 OK"), "STATE未初期化でcraftmanが200を返していない: {}", res);
+
+    // 一方、On始まりのイベントは従来通りnot initializedエラーになる
+    let onboot_req = "SEND SHIORI/3.0\r\nID: OnBoot\r\nSender: SSP\r\nCharset: UTF-8\r\n\r\n";
+    let res = handle_request(onboot_req);
+    assert!(res.contains("not initialized"), "STATE未初期化でOnBootがnot initializedにならない: {}", res);
+}
+
     #[test]
     fn test_request_log_not_written_when_debug_log_off() {
         let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());

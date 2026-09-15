@@ -5,6 +5,9 @@
 use std::collections::HashMap;
 use std::ffi::c_long;
 use std::path::Path;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
 use encoding_rs::SHIFT_JIS;  // ★追加
 use winapi::shared::minwindef::{HGLOBAL, HMODULE};
 use winapi::um::libloaderapi::{FreeLibrary, GetProcAddress, LoadLibraryW};
@@ -23,6 +26,20 @@ pub struct SaoriDll {
 
 // HMODULEはSendでないのでラッパーで対処
 unsafe impl Send for SaoriDll {}
+
+/// SyncはArc<SaoriDll>をタイムアウト監視用のバックグラウンドスレッドへ
+/// 渡す（=別スレッドからも参照されうる）ために必要。
+/// SaoriDllのフィールドはハンドル・関数ポインタのみでRust側に内部可変性は
+/// 無いため、Rustのメモリ安全性の観点では問題ない。
+///
+/// ただし「実際にrequest_fnを複数スレッドから同時に呼んでよいか」はSAORI
+/// DLL実装依存であり、多くのSAORI/1.0実装はシングルスレッド前提で
+/// 書かれている。このためrequest_with_timeoutの呼び出し側
+/// （codegen.rsのsaoriビルトイン）は、一度タイムアウトしたDLL名を
+/// 記録して二度と呼び出さないことで、バックグラウンドに取り残された
+/// 呼び出しと新しい呼び出しが同時に同一DLLのrequest_fnへ入らないよう
+/// 保証している。この呼び出し側の規律が、Syncの安全性の前提となる。
+unsafe impl Sync for SaoriDll {}
 
 // ↓ 追加。unload メソッドは削除
 impl Drop for SaoriDll {
@@ -133,6 +150,45 @@ unsafe {
         parse_response(&response)
     }
 
+}
+
+/// SAORIへの`request`呼び出しを別スレッドで実行し、`timeout`で待ちを打ち切る。
+///
+/// SAORI DLL（外部プラグイン）がハング・無限ループした場合、`request_fn`は
+/// 同期呼び出しなのでこちらが呼び出し元スレッドで永遠に待たされる。
+/// このスレッドはSHIORIのrequest処理中でありSTATEのMutexを握ったままなので、
+/// 放置するとSSP自体がフリーズする。
+///
+/// Rustではスレッドを安全に強制終了できないため、ここでは「待つのを諦めて
+/// 制御を返す」ことしかできない。バックグラウンドの呼び出しはtimeout後も
+/// 走り続ける可能性があるため、`dll`をArcで受け取り、バックグラウンド
+/// スレッド側がそのクローンを最後まで保持することで、呼び出し元が
+/// 先にキャッシュから追い出してもDLLの実体（FreeLibrary/unload）が
+/// 呼び出し完了前に破棄されないようにしている。
+///
+/// 呼び出し元は、timeoutした（Noneが返った）DLL名を二度と呼び出さないこと。
+/// 取り残されたバックグラウンド呼び出しと新しい呼び出しが同時に同一DLLの
+/// request_fnへ入ることを避けるため（SaoriDllのSync実装のコメント参照）。
+pub fn request_with_timeout(
+    dll: Arc<SaoriDll>,
+    args: Vec<String>,
+    timeout: Duration,
+) -> Option<HashMap<String, String>> {
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("saori-call".to_string())
+        .spawn(move || {
+            let result = dll.request(&args);
+            // 受信側が既にタイムアウトで諦めていてもsendのErrは無視してよい
+            let _ = tx.send(result);
+        });
+
+    if spawned.is_err() {
+        append_log!("saori: タイムアウト監視スレッドの起動に失敗しました");
+        return None;
+    }
+
+    rx.recv_timeout(timeout).ok()
 }
 
 /// SAORI DLLが`request_fn`経由で報告してきた応答長`len`を検証する。
