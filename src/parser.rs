@@ -1343,7 +1343,7 @@ pub fn load_program(
         .into_result()
         .map_err(|errors| {
             let msgs: Vec<String> = errors.iter()
-                .map(|e| rich_to_japanese(e, src, &file_name))
+                .map(|e| rich_to_japanese(e, &pre, &file_name))
                 .collect();
             LoadError::ParseError(msgs, entry.to_path_buf())
         })?;
@@ -1375,12 +1375,10 @@ pub fn load_program(
 
 // ── エラーメッセージ日本語化 ──────────────────────────────
 
-fn rich_to_japanese(e: &Rich<char>, src: &str, file_name: &str) -> String {
-    let pos = e.span().start;
-    let line = src[..pos.min(src.len())]
-        .chars()
-        .filter(|&c| c == '\n')
-        .count() + 1;
+fn rich_to_japanese(e: &Rich<char>, pre: &PreprocessResult, file_name: &str) -> String {
+    let pos = e.span().start as u32;
+    let output_line = line_at_offset(pos, &pre.src);
+    let line = pre.resolve_line(output_line);
     let msg = reason_to_japanese(e.reason());
     format!("{}の{}行目: {}", file_name, line, msg)
 }
@@ -1885,4 +1883,28 @@ OnClose => {
 }"#;
     let result = preprocess(src).expect("preprocess failed");
     assert_eq!(result.line_map.len(), result.src.lines().count());
+}
+
+#[test]
+fn test_rich_to_japanese_resolves_line_after_dialogue_merge() {
+    // セリフ本文と継続行の結合でpreprocess後の行数が元ソースより
+    // 減っても、rich_to_japaneseが返す行番号は元ソースの行番号と
+    // 一致すること（実機で3行分ズレるバグが発生していた）。
+    let src = r#"OnBoot => {
+    湊: ほげ
+    ふが
+    let x
+}"#;
+    // 元ソースでは「let x」は4行目。
+    let pre = preprocess(src).expect("preprocess failed");
+    let errors = program_with_include()
+        .parse(&*pre.src)
+        .into_result()
+        .expect_err("「let x」は「=値」を欠いており構文エラーになるはず");
+    let msg = rich_to_japanese(&errors[0], &pre, "main.mnt");
+    assert!(
+        msg.contains("4行目"),
+        "preprocess後にズレた行番号ではなく元ソースの4行目が報告されるべき: {}",
+        msg
+    );
 }
