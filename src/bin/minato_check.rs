@@ -7,11 +7,47 @@
 
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use minato::analyzer::Analyzer;
-use minato::parser::{load_program, LoadError, Talk};
+use minato::parser::{load_program, AssignOp, Expr, LoadError, PathSegment, Spanned, Stmt, Talk};
+
+type LoadResult = Result<
+    (
+        Vec<Talk>,
+        Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>,
+        Vec<(Vec<PathSegment>, AssignOp, Expr)>,
+    ),
+    LoadError,
+>;
+
+/// chumskyの再帰下降パーサーは実サイズのmain.mntだと既定のスレッドスタック
+/// （Windowsのメインスレッドは通常1MB程度）では足りずオーバーフローすることが
+/// あるため、SSP向けDLL側のload_program_guardedと同様に大きいスタックを
+/// 持つ別スレッドで実行する。
+fn run_load_program(main_mnt: &Path) -> LoadResult {
+    let main_mnt = main_mnt.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024) // 16MB
+        .spawn(move || {
+            let mut visited = HashSet::new();
+            load_program(&main_mnt, &mut visited)
+        });
+
+    match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(LoadError::PreprocessError(
+                "パース処理中に予期しないエラー（パニック）が発生しました".to_string(),
+            )),
+        },
+        Err(e) => Err(LoadError::PreprocessError(format!(
+            "パース処理を開始できませんでした: {}",
+            e
+        ))),
+    }
+}
 
 fn main() -> ExitCode {
     let mut args = env::args();
@@ -27,8 +63,7 @@ fn main() -> ExitCode {
 
     let main_mnt = ghost_dir.join("talks").join("main.mnt");
 
-    let mut visited = HashSet::new();
-    let (all_talks, all_funcs, _all_globals) = match load_program(&main_mnt, &mut visited) {
+    let (all_talks, all_funcs, _all_globals) = match run_load_program(&main_mnt) {
         Ok(r) => r,
         Err(LoadError::PreprocessError(msg)) => {
             eprintln!("[preprocess error] {}", msg);
