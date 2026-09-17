@@ -20,6 +20,7 @@ docs/book/
 
 # 配布用ビルド成果物（tools/minato_check.bat と組み合わせて配る用。ビルドして各自生成する）
 tools/minato_check.exe
+tools/minato_check.zip
 parser_original.rs
 runtime_original.rs
 lib_original.rs
