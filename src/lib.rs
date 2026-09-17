@@ -445,7 +445,7 @@ if !error_only.is_empty() {
     return Ok(state);
 }
            for _e in analyze_errors.iter().filter(|e| e.level == "notice") {
-    append_log!(format!("notice: {}内: {}", _e.event, _e.message));
+    append_log!(format!("notice: {}内 {}行目: {}", _e.event, _e.line, _e.message));
 }
 
 // ★追加: 静的チェックのwarningは最初のイベント応答で一度だけ返す
