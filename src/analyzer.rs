@@ -218,7 +218,7 @@ mod tests {
     use chumsky::Parser;
 
     fn parse_talks_and_funcs(src: &str) -> (Vec<Talk>, Vec<(String, Vec<String>, Vec<Stmt>)>) {
-        let preprocessed = preprocess(src).expect("preprocess failed");
+        let preprocessed = preprocess(src).expect("preprocess failed").src;
         let items = program_with_include().parse(&*preprocessed).into_result().expect("parse failed");
         let mut talks = vec![];
         let mut funcs = vec![];

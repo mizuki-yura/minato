@@ -985,22 +985,43 @@ fn ends_with_bare_assign(s: &str) -> bool {
 /// 悪化したため採用しなかった）
 const MAX_NESTING_DEPTH: u32 = 200;
 
-pub fn preprocess(src: &str) -> Result<String, String> {
+/// preprocess の結果。セリフや継続行を1行に結合した出力ソースと、
+/// 出力の各行が元ソースの何行目に由来するかの対応表を持つ。
+pub struct PreprocessResult {
+    pub src: String,
+    /// line_map[i] = 出力の (i+1) 行目が由来する元ソースの行番号。
+    /// 1行に複数の元行が結合された場合は、その行の「先頭」の元行番号を持つ。
+    line_map: Vec<u32>,
+}
+
+impl PreprocessResult {
+    /// 出力側の行番号（1-indexed）から元ソースの行番号を引く。
+    pub fn resolve_line(&self, output_line: u32) -> u32 {
+        self.line_map
+            .get((output_line as usize).saturating_sub(1))
+            .copied()
+            .unwrap_or(output_line)
+    }
+}
+
+pub fn preprocess(src: &str) -> Result<PreprocessResult, String> {
     let mut out = String::new();
-    let mut buf: Option<String> = None;
+    let mut line_map: Vec<u32> = Vec::new();
+    let mut buf: Option<(String, u32)> = None;
     let mut prev_chara: Option<String> = None;
     let mut brace_stack: Vec<BraceKind> = Vec::new();   // ★ brace_depth → brace_stack
     let mut nesting_depth: u32 = 0;
 
     for (line_idx, line) in src.lines().enumerate() {
-        let line_num = line_idx + 1;
+        let line_num = (line_idx + 1) as u32;
         let trimmed = line.trim();
 
 
         if ends_with_bare_assign(trimmed) {
-            if let Some(b) = buf.take() {
+            if let Some((b, start_line)) = buf.take() {
                 out.push_str(&b);
                 out.push('\n');
+                line_map.push(start_line);
             }
             return Err(format!(
                 "{}行目: 代入する値がありません。「{}」の後に値を書いてください。",
@@ -1057,7 +1078,11 @@ pub fn preprocess(src: &str) -> Result<String, String> {
 
         match kind {
             LineKind::Separator => {
-                if let Some(b) = buf.take() { out.push_str(&b); out.push('\n'); }
+                if let Some((b, start_line)) = buf.take() {
+                    out.push_str(&b);
+                    out.push('\n');
+                    line_map.push(start_line);
+                }
                 prev_chara = None;
             }
             LineKind::Dialogue => {
@@ -1067,7 +1092,7 @@ pub fn preprocess(src: &str) -> Result<String, String> {
                     line.to_string()
                 };
                 let cur_chara = extract_chara(trimmed);
-                if let Some(b) = buf.take() {
+                if let Some((b, start_line)) = buf.take() {
                     if prev_chara.as_deref() == cur_chara.as_deref() {
                         out.push_str(b.trim_end());
                         out.push_str("\\n");
@@ -1076,33 +1101,41 @@ pub fn preprocess(src: &str) -> Result<String, String> {
                         out.push_str(&b);
                         out.push('\n');
                     }
+                    line_map.push(start_line);
                 }
                 prev_chara = cur_chara;
-                buf = Some(line_clean);
+                buf = Some((line_clean, line_num));
             }
             LineKind::TagAppend | LineKind::Continuation => {
-                if let Some(ref mut b) = buf {
+                if let Some((ref mut b, _)) = buf {
                     b.push_str("\\n");
                     b.push_str(trimmed);
                 }
             }
             LineKind::Code => {
-                if let Some(b) = buf.take() { out.push_str(&b); out.push('\n'); }
+                if let Some((b, start_line)) = buf.take() {
+                    out.push_str(&b);
+                    out.push('\n');
+                    line_map.push(start_line);
+                }
                 prev_chara = None;
                 out.push_str(line);
                 out.push('\n');
+                line_map.push(line_num);
             }
             LineKind::Bare => {
                 out.push_str(line);
                 out.push('\n');
+                line_map.push(line_num);
             }
         }
     }
-    if let Some(b) = buf {
+    if let Some((b, start_line)) = buf {
         out.push_str(&b);
         out.push('\n');
+        line_map.push(start_line);
     }
-    Ok(out)
+    Ok(PreprocessResult { src: out, line_map })
 }
 
 //// 文字列リテラルの外側にある { と } の数を数える
@@ -1258,7 +1291,7 @@ pub fn load_program(
 
     append_log!("before preprocess");
     let src = match preprocess(&src) {
-        Ok(s) => s,
+        Ok(r) => r.src,
         Err(e) => return Err(LoadError::PreprocessError(e)),
     };
     append_log!("after preprocess");
@@ -1491,7 +1524,7 @@ fn test_preprocess_calendar2() {
       日の出：${sun_hour(sunrise)}時分
 }"#;
     let result = preprocess(src).expect("preprocess failed");
-    println!("result:\n{}", result);
+    println!("result:\n{}", result.src);
 }
 #[test]
 fn test_is_dialogue_line_debug() {
@@ -1515,7 +1548,7 @@ fn test_preprocess_dialogue_merge_inside_if_block() {
         湊: B
     }
 }"#;
-    let out = preprocess(src).expect("preprocess failed");
+    let out = preprocess(src).expect("preprocess failed").src;
     // A行末に \n（SAKURAの改行タグ）が挿入され、if の中で正しくマージされる
     assert!(out.contains("湊: A\\n"));
     println!("{}", out);
@@ -1530,7 +1563,7 @@ fn test_preprocess_multiline_dialogue_inside_for_loop() {
         ふが
     }
 }"#;
-    let out = preprocess(src).expect("preprocess failed");
+    let out = preprocess(src).expect("preprocess failed").src;
     assert!(out.contains("ほげ\\nふが"));
 }
 
@@ -1549,7 +1582,7 @@ fn test_preprocess_map_still_excluded_inside_nested_block() {
         global save.count = len(m)
     }
 }"#;
-    let out = preprocess(src).expect("preprocess failed");
+    let out = preprocess(src).expect("preprocess failed").src;
     // a: 1 / b: 2 がダイアログ結合（\n連結）の対象になっていないことを確認
     assert!(!out.contains("a: 1\\n"));
     let talks = crate::parser::program_with_include()
@@ -1566,7 +1599,7 @@ fn test_preprocess_interpolation_does_not_corrupt_brace_stack() {
         湊: 続き
     }
 }"#;
-    let out = preprocess(src).expect("preprocess failed");
+    let out = preprocess(src).expect("preprocess failed").src;
     assert!(out.contains("回目\\n"), "brace_stack corrupted by ${{}}: {}", out);
 }
 
@@ -1690,7 +1723,7 @@ fn test_dialogue_containing_open_brace_does_not_corrupt_brace_stack() {
     湊: 開き括弧「{」の話
     湊: 続き
 }"#;
-    let out = preprocess(src).expect("preprocess failed");
+    let out = preprocess(src).expect("preprocess failed").src;
     assert!(out.contains("話\\n"), "セリフ本文の「{{」でbrace_stackが壊れている: {}", out);
     assert!(
         program_with_include().parse(&*out).into_result().is_ok(),
@@ -1704,7 +1737,7 @@ fn test_dialogue_containing_close_brace_does_not_pop_block() {
     湊: 閉じ括弧「}」の話
     湊: 続き
 }"#;
-    let out = preprocess(src).expect("preprocess failed");
+    let out = preprocess(src).expect("preprocess failed").src;
     assert!(out.contains("話\\n"), "セリフ本文の「}}」でbrace_stackが壊れている: {}", out);
 }
 
@@ -1718,6 +1751,61 @@ OnClose => {
     湊: A
     湊: B
 }"#;
-    let out = preprocess(src).expect("preprocess failed");
+    let out = preprocess(src).expect("preprocess failed").src;
     assert!(out.contains("湊: A\\n"), "次のトークまでズレが残っている: {}", out);
+}
+
+#[test]
+fn test_line_number_preserved_simple() {
+    let src = "OnBoot => {\n    call 存在しない関数()\n}";
+    let result = preprocess(src).expect("preprocess failed");
+    let output_line = result.src.lines()
+        .position(|l| l.contains("call 存在しない関数"))
+        .map(|i| i + 1)
+        .unwrap();
+    let original_line = result.resolve_line(output_line as u32);
+    assert_eq!(original_line, 2);
+}
+
+#[test]
+fn test_line_number_preserved_dialogue_merge() {
+    // セリフ本文と継続行が1行に結合されても、由来する元行番号は
+    // その結合行の「先頭」（湊: セリフ1のある行）を指すこと。
+    let src = r#"OnBoot => {
+    湊: セリフ1
+    続き
+    湊: セリフ2
+    call 存在しない関数()
+}"#;
+    let result = preprocess(src).expect("preprocess failed");
+
+    let merged_output_line = result.src.lines()
+        .position(|l| l.contains("セリフ1"))
+        .map(|i| i + 1)
+        .unwrap();
+    assert_eq!(result.resolve_line(merged_output_line as u32), 2);
+
+    let call_output_line = result.src.lines()
+        .position(|l| l.contains("call 存在しない関数"))
+        .map(|i| i + 1)
+        .unwrap();
+    assert_eq!(result.resolve_line(call_output_line as u32), 5);
+}
+
+#[test]
+fn test_line_map_len_matches_output_lines() {
+    // out に積む行数と line_map に push する数が必ず1対1になること
+    // （out.lines().count() == line_map.len() が保たれること）の回帰確認。
+    let src = r#"OnBoot => {
+    湊: A
+    B
+    ;
+    湊: C
+    let x = 1
+}
+OnClose => {
+    湊: D
+}"#;
+    let result = preprocess(src).expect("preprocess failed");
+    assert_eq!(result.line_map.len(), result.src.lines().count());
 }

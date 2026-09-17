@@ -2336,7 +2336,7 @@ mod tests {
 
     fn parse_talks(src: &str) -> Vec<Talk> {
         use crate::parser::preprocess;
-        let preprocessed = preprocess(src).expect("preprocess failed");
+        let preprocessed = preprocess(src).expect("preprocess failed").src;
         let x = program_with_include().parse(&*preprocessed).unwrap();
         x.into_iter().filter_map(|item| if let ProgramItem::Talk(t) = item { Some(t) } else { None }).collect()
     }
