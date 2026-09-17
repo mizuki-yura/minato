@@ -51,18 +51,26 @@ pub struct Line {
     pub content: Vec<StrPart>,
 }
 
+/// Stmtに、由来する元ソースの行番号を添えたもの。
+/// preprocessで結合された行の場合も、行番号はpreprocess前の元ファイル基準になる。
+#[derive(Debug, Clone)]
+pub struct Spanned<T> {
+    pub node: T,
+    pub line: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Dialogue(Line),
     Let(String, Expr),
     Global(Vec<PathSegment>, AssignOp, Expr),
     Assign(Vec<PathSegment>, AssignOp, Expr),
-    If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
-    For { init: Box<Stmt>, cond: Expr, step: Box<Stmt>, body: Vec<Stmt> },
-    ForEach { collection: Expr, key: String, value: Option<String>, body: Vec<Stmt> },
-    While(Expr, Vec<Stmt>),
+    If(Expr, Vec<Spanned<Stmt>>, Option<Vec<Spanned<Stmt>>>),
+    For { init: Box<Stmt>, cond: Expr, step: Box<Stmt>, body: Vec<Spanned<Stmt>> },
+    ForEach { collection: Expr, key: String, value: Option<String>, body: Vec<Spanned<Stmt>> },
+    While(Expr, Vec<Spanned<Stmt>>),
     Call(Expr),
-    FuncDef { name: String, params: Vec<String>, body: Vec<Stmt> },
+    FuncDef { name: String, params: Vec<String>, body: Vec<Spanned<Stmt>> },
     Return(Expr),
     Break,
     Continue,
@@ -72,7 +80,7 @@ pub enum Stmt {
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub patterns: Vec<MatchPattern>,
-    pub body: Vec<Stmt>,
+    pub body: Vec<Spanned<Stmt>>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +93,7 @@ pub enum MatchPattern {
 pub struct Talk {
     pub event: String,
     pub cond: Option<Expr>,
-    pub body: Vec<Stmt>,
+    pub body: Vec<Spanned<Stmt>>,
 }
 
 // ── パーサー ─────────────────────────────────────────────
@@ -665,7 +673,7 @@ fn assign_stmt<'a>() -> impl Parser<'a, &'a str, Stmt, extra::Err<Rich<'a, char>
 
 // ── stmt ─────────────────────────────────────────────────
 
-fn stmt<'a>() -> impl Parser<'a, &'a str, Stmt, extra::Err<Rich<'a, char>>> + Clone {
+fn stmt<'a>() -> impl Parser<'a, &'a str, Spanned<Stmt>, extra::Err<Rich<'a, char>>> + Clone {
     recursive(|stmt| {
         let block = just('{')
             .ignore_then(ws_nl())
@@ -792,7 +800,12 @@ let while_loop = keyword("while")         // just("while") から変更
                     keyword("else")
                         .ignore_then(ws())
                         .ignore_then(
-                            if_stmt.map(|s| vec![s]).or(block.clone()),
+                            // 「else if ...」は入れ子のif_stmt（Stmt::If単体）を
+                            // else_bodyのVec<Spanned<Stmt>>に合わせて1要素でラップする。
+                            // このSpannedのlineはIf自体の行であり、check_stmt側では
+                            // Stmt::Ifノード自体の行番号を参照しないため使われない
+                            // （実際に報告されるのは中のthen_body/else_body各文の行）。
+                            if_stmt.map(|s| vec![Spanned { node: s, line: 0 }]).or(block.clone()),
                         )
                         .or_not(),
                 )
@@ -902,6 +915,11 @@ let expr_stmt = ident()
                     Stmt::Let("__skip__".to_string(), Expr::Str(s))
                 })
         ))
+        // ★行番号は、preprocess後のソース上でのバイトオフセットとして
+        //   ひとまず持たせておく（この時点ではまだ「preprocess後の行番号」で
+        //   「元ソースの行番号」ではない）。実際の行番号への変換は
+        //   resolve_stmt_lines() でパース完了後にまとめて行う。
+        .map_with(|stmt, e| Spanned { node: stmt, line: e.span().start as u32 })
     })
 }
 
@@ -1277,7 +1295,7 @@ pub fn load_program(
     entry: &Path,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<
-    (Vec<Talk>, Vec<(String, Vec<String>, Vec<Stmt>)>, Vec<(Vec<PathSegment>, AssignOp, Expr)>),
+    (Vec<Talk>, Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>, Vec<(Vec<PathSegment>, AssignOp, Expr)>),
     LoadError
 > {
     let canonical = entry.canonicalize().unwrap_or_else(|_| entry.to_path_buf());
@@ -1290,10 +1308,11 @@ pub fn load_program(
         .map_err(|e| LoadError::PreprocessError(format!("ファイルが読み込めません: {}", e)))?;
 
     append_log!("before preprocess");
-    let src = match preprocess(&src) {
-        Ok(r) => r.src,
+    let pre = match preprocess(&src) {
+        Ok(r) => r,
         Err(e) => return Err(LoadError::PreprocessError(e)),
     };
+    let src: &str = &pre.src;
     append_log!("after preprocess");
 
     let base_dir = entry.parent().unwrap_or(Path::new("."));
@@ -1315,16 +1334,17 @@ pub fn load_program(
         .to_string_lossy()
         .to_string();
 
-    let items = program_with_include()
-        .parse(&*src)
+    let mut items = program_with_include()
+        .parse(src)
         .into_result()
         .map_err(|errors| {
             let msgs: Vec<String> = errors.iter()
-                .map(|e| rich_to_japanese(e, &src, &file_name))
+                .map(|e| rich_to_japanese(e, src, &file_name))
                 .collect();
             LoadError::ParseError(msgs, entry.to_path_buf())
         })?;
- 
+    resolve_program_item_lines(&mut items, src, &pre);
+
     append_log!("after parse");
 
     let mut talks = vec![];
@@ -1438,8 +1458,61 @@ fn rich_to_japanese(e: &Rich<char>, src: &str, file_name: &str) -> String {
 pub enum ProgramItem {
     Include(String),
     Talk(Talk),
-    FuncDef { name: String, params: Vec<String>, body: Vec<Stmt> },
+    FuncDef { name: String, params: Vec<String>, body: Vec<Spanned<Stmt>> },
     Global(Vec<PathSegment>, AssignOp, Expr),
+}
+
+// ── 行番号解決 ───────────────────────────────────────────
+// stmt()のmap_withでは、Spanned.lineに「preprocess後のソース上のバイト
+// オフセット」を暫定的に入れている（パーサーコンビネータの中では
+// テキストを自由に参照できないため）。パースが完了した後、この
+// バイトオフセットを実際の行番号に変換し、さらにPreprocessResultの
+// resolve_lineを通して元ソースの行番号に変換する。
+
+/// バイトオフセットが、preprocess後のソース上で何行目に当たるかを返す（1-indexed）。
+/// rich_to_japaneseと同じ考え方（オフセットより前の改行文字を数える）。
+fn line_at_offset(offset: u32, src: &str) -> u32 {
+    let pos = (offset as usize).min(src.len());
+    src[..pos].chars().filter(|&c| c == '\n').count() as u32 + 1
+}
+
+/// Vec<Spanned<Stmt>>を再帰的に辿り、各Spanned.lineを
+/// 「preprocess後のバイトオフセット」から「元ソースの行番号」に書き換える。
+fn resolve_stmt_lines(stmts: &mut [Spanned<Stmt>], src: &str, pre: &PreprocessResult) {
+    for spanned in stmts.iter_mut() {
+        let preprocessed_line = line_at_offset(spanned.line, src);
+        spanned.line = pre.resolve_line(preprocessed_line);
+        match &mut spanned.node {
+            Stmt::If(_, then_body, else_body) => {
+                resolve_stmt_lines(then_body, src, pre);
+                if let Some(eb) = else_body {
+                    resolve_stmt_lines(eb, src, pre);
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre),
+            Stmt::While(_, body) => resolve_stmt_lines(body, src, pre),
+            Stmt::Match { arms, .. } => {
+                for arm in arms.iter_mut() {
+                    resolve_stmt_lines(&mut arm.body, src, pre);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// program_with_include()の結果全体について、含まれるTalk/FuncDefの
+/// 本体すべての行番号を元ソースの行番号に変換する。
+pub fn resolve_program_item_lines(items: &mut [ProgramItem], src: &str, pre: &PreprocessResult) {
+    for item in items.iter_mut() {
+        match item {
+            ProgramItem::Talk(talk) => resolve_stmt_lines(&mut talk.body, src, pre),
+            ProgramItem::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre),
+            ProgramItem::Include(_) | ProgramItem::Global(_, _, _) => {}
+        }
+    }
 }
 
 fn include_directive<'a>() -> impl Parser<'a, &'a str, ProgramItem, extra::Err<Rich<'a, char>>> + Clone {
@@ -1620,7 +1693,7 @@ fn test_not_and_precedence_structural() {
         _ => None,
     }).unwrap();
 
-    match &talk.body[0] {
+    match &talk.body[0].node {
         Stmt::If(cond, _, _) => match cond {
             // !x && y は And(Not(x), y) であるべき（Not(And(x, y)) ではない）
             Expr::And(lhs, rhs) => {

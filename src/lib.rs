@@ -21,7 +21,7 @@ use codegen::Codegen;
 
 use crate::codegen::Value;
 use config::Config;
-use parser::{load_program, Talk, LoadError,Stmt};
+use parser::{load_program, Talk, LoadError, Stmt, Spanned};
 
 use winapi::um::winbase::{GlobalAlloc, GlobalFree, GMEM_FIXED};
 use winapi::shared::minwindef::HGLOBAL;
@@ -264,7 +264,7 @@ pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
 fn load_program_guarded(
     main: &Path,
 ) -> Result<
-    (Vec<Talk>, Vec<(String, Vec<String>, Vec<Stmt>)>, Vec<(Vec<parser::PathSegment>, parser::AssignOp, parser::Expr)>),
+    (Vec<Talk>, Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>, Vec<(Vec<parser::PathSegment>, parser::AssignOp, parser::Expr)>),
     LoadError
 > {
     let main = main.to_path_buf();
@@ -422,7 +422,7 @@ let error_only: Vec<_> = analyze_errors.iter()
 
 if !error_only.is_empty() {
     let msg = error_only.iter()
-        .map(|e| format!("{}内: {}", e.event, e.message))
+        .map(|e| format!("{}内 {}行目: {}", e.event, e.line, e.message))
         .collect::<Vec<_>>()
         .join("\\n");
     // ... return Ok(state) でブロック
@@ -451,7 +451,7 @@ if !error_only.is_empty() {
 // ★追加: 静的チェックのwarningは最初のイベント応答で一度だけ返す
 let analyze_warnings: Vec<(String, String)> = analyze_errors.iter()
     .filter(|e| e.level == "warning")
-    .map(|e| ("warning".to_string(), format!("{}内: {}", e.event, e.message)))
+    .map(|e| ("warning".to_string(), format!("{}内 {}行目: {}", e.event, e.line, e.message)))
     .collect();
 
 if let Some(_v) = talks.get("OnMouseDoubleClick") {

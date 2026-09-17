@@ -1,13 +1,14 @@
 // analyzer.rs
 // ASTの静的チェック
 use std::collections::{HashMap, HashSet};
-use crate::parser::{Stmt, Expr, Talk};
+use crate::parser::{Stmt, Expr, Talk, Spanned};
 use crate::codegen::is_builtin;
 #[derive(Debug)]
 pub struct AnalyzeError {
       pub level:String,
     pub event: String,
     pub message: String,
+    pub line: u32,
 }
 
 pub struct Analyzer<'a> {
@@ -37,7 +38,7 @@ impl<'a> Analyzer<'a> {
 pub fn analyze(
     mut self,
     talks: &'a HashMap<String, Vec<Talk>>,
-    funcs: &'a [(String, Vec<String>, Vec<Stmt>)],
+    funcs: &'a [(String, Vec<String>, Vec<Spanned<Stmt>>)],
 ) -> Vec<AnalyzeError> {
     // talkを検査
     // HashMapの走査順は非決定的（実行のたびに変わりうる）なため、
@@ -69,13 +70,15 @@ pub fn analyze(
     self.errors
 }
 
-    fn check_stmts(&mut self, stmts: &[Stmt]) {
-        for stmt in stmts {
-            self.check_stmt(stmt);
+    fn check_stmts(&mut self, stmts: &[Spanned<Stmt>]) {
+        for spanned in stmts {
+            self.check_stmt(spanned);
         }
     }
 
-    fn check_stmt(&mut self, stmt: &Stmt) {
+    fn check_stmt(&mut self, spanned: &Spanned<Stmt>) {
+        let line = spanned.line;
+        let stmt = &spanned.node;
         match stmt {
             Stmt::Break => {
                 if self.loop_depth == 0 {
@@ -83,6 +86,7 @@ pub fn analyze(
                          level: "error".to_string(),
                         event: self.current_context.to_string(),
                         message: "ループの外で break を使っています".to_string(),
+                        line,
                     });
                 }
             }
@@ -92,13 +96,14 @@ pub fn analyze(
                         level: "error".to_string(),
                         event: self.current_context.to_string(),
                         message: "ループの外で continue を使っています".to_string(),
+                        line,
                     });
                 }
             }
            Stmt::Return(_) => {
 
 }
-            
+
 Stmt::Call(expr) => {
     match expr {
         Expr::Var(path) if path.len() == 1 => {
@@ -111,6 +116,7 @@ Stmt::Call(expr) => {
                         "\"{}\" は未定義です（動的callなら無視してください）",
                         name
                     ),
+                    line,
                 });
             }
         }
@@ -126,6 +132,7 @@ Stmt::Call(expr) => {
                         "\"{}\" は未定義です（ビルトイン関数でも talk でも func でもありません）",
                         name
                     ),
+                    line,
                 });
             }
         }
@@ -177,15 +184,15 @@ Stmt::Call(expr) => {
 /// 文リスト直下（ネストしたブロックの中も含む）で定義されているFuncDefの名前を集める。
 /// analyze実行前に1パス走査して、talk/func本体内でローカル定義される関数名を
 /// あらかじめ把握するために使う。
-fn collect_local_func_names(stmts: &[Stmt]) -> HashSet<String> {
+fn collect_local_func_names(stmts: &[Spanned<Stmt>]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_local_func_names_into(stmts, &mut names);
     names
 }
 
-fn collect_local_func_names_into(stmts: &[Stmt], names: &mut HashSet<String>) {
-    for stmt in stmts {
-        match stmt {
+fn collect_local_func_names_into(stmts: &[Spanned<Stmt>], names: &mut HashSet<String>) {
+    for spanned in stmts {
+        match &spanned.node {
             Stmt::FuncDef { name, body, .. } => {
                 names.insert(name.clone());
                 collect_local_func_names_into(body, names);
@@ -214,12 +221,13 @@ fn collect_local_func_names_into(stmts: &[Stmt], names: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{preprocess, program_with_include, ProgramItem, Talk};
+    use crate::parser::{preprocess, program_with_include, resolve_program_item_lines, ProgramItem, Talk};
     use chumsky::Parser;
 
-    fn parse_talks_and_funcs(src: &str) -> (Vec<Talk>, Vec<(String, Vec<String>, Vec<Stmt>)>) {
-        let preprocessed = preprocess(src).expect("preprocess failed").src;
-        let items = program_with_include().parse(&*preprocessed).into_result().expect("parse failed");
+    fn parse_talks_and_funcs(src: &str) -> (Vec<Talk>, Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>) {
+        let pre = preprocess(src).expect("preprocess failed");
+        let mut items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
+        resolve_program_item_lines(&mut items, &pre.src, &pre);
         let mut talks = vec![];
         let mut funcs = vec![];
         for item in items {
@@ -277,6 +285,35 @@ mod tests {
             errors.iter().any(|e| e.message.contains("存在しない関数") && e.message.contains("未定義")),
             "本来検出すべき未定義callが見逃されている: {:?}", errors
         );
+        let notice = errors.iter()
+            .find(|e| e.message.contains("存在しない関数"))
+            .expect("未定義callのnoticeが見つからない");
+        assert_eq!(notice.line, 2, "未定義callの行番号が実際のcall文の行と一致しない: {:?}", errors);
+    }
+
+    #[test]
+    fn test_undefined_call_line_number_survives_dialogue_merge() {
+        // トーク定義内に複数行のセリフを挟んでも、未定義callのAnalyzeError.lineが
+        // preprocessによる行結合の影響を受けず、元ソースの実際の行番号を指すこと。
+        let src = r#"OnBoot => {
+    湊: 1行目
+    湊: 2行目
+    call 存在しない関数
+}"#;
+        let (talks, funcs) = parse_talks_and_funcs(src);
+        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+        for t in &talks {
+            talk_map.entry(t.event.clone()).or_default().push(t.clone());
+        }
+        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
+        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
+
+        let errors = Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs);
+
+        let notice = errors.iter()
+            .find(|e| e.message.contains("存在しない関数") && e.message.contains("未定義"))
+            .expect("本来検出すべき未定義callが見逃されている");
+        assert_eq!(notice.line, 4, "「call 存在しない関数」の実際の行(4行目)と一致しない: {:?}", errors);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use crate::parser::{
-    AssignOp, CmpOp, Expr, Stmt, StrPart, Talk, Line, BinOp, PathSegment, MatchPattern
+    AssignOp, CmpOp, Expr, Stmt, StrPart, Talk, Line, BinOp, PathSegment, MatchPattern, Spanned
 };
 use indexmap::IndexMap;
 
@@ -70,7 +70,7 @@ pub struct Env {
     pub globals: HashMap<String, Value>,
     locals: Vec<HashMap<String, Value>>,
     pub characters: HashMap<String, String>,
-    pub funcs: HashMap<String, (Vec<String>, Vec<Stmt>)>,
+    pub funcs: HashMap<String, (Vec<String>, Vec<Spanned<Stmt>>)>,
     pub call_depth: usize,
     /// このイベント処理中にget_property/saoriを呼び出した回数。
     /// MAX_EXTERNAL_CALLS_PER_EVENTと合わせて使う（consume_external_call_budget参照）。
@@ -1253,7 +1253,13 @@ self.current_scope = None;
 
     // ── gen_stmt ──────────────────────────────────────────
 
-    fn gen_stmt(&mut self, stmt: &Stmt, out: &mut String) -> Option<FlowControl> {
+    fn gen_stmt(&mut self, spanned: &Spanned<Stmt>, out: &mut String) -> Option<FlowControl> {
+        self.gen_stmt_inner(&spanned.node, out)
+    }
+
+    // Stmt::Forのinit/stepはSpannedでラップされていない生のStmtなので、
+    // そちらから呼べるよう行番号を持たない実体をここに分離している。
+    fn gen_stmt_inner(&mut self, stmt: &Stmt, out: &mut String) -> Option<FlowControl> {
         #[cfg(debug_assertions)]
         append_log!(format!("gen_stmt: {:?}", stmt));
         match stmt {
@@ -1308,7 +1314,7 @@ Stmt::Assign(path, op, expr) => {
 
 Stmt::For { init, cond, step, body } => {
     self.env.push_scope();
-    self.gen_stmt(init, out);
+    self.gen_stmt_inner(init, out);
     let mut count = 0;
     let mut result = None;
     loop {
@@ -2246,7 +2252,7 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
     self.env.call_depth -= 1;
 }
 
-    fn run_stmts(&mut self, stmts: &[Stmt], out: &mut String) -> Option<FlowControl> {
+    fn run_stmts(&mut self, stmts: &[Spanned<Stmt>], out: &mut String) -> Option<FlowControl> {
         for s in stmts {
             if let Some(fc) = self.gen_stmt(s, out) { return Some(fc); }
         }
@@ -2262,7 +2268,7 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
             }
         }
         let mut dummy = String::new();
-        self.gen_stmt(step, &mut dummy);
+        self.gen_stmt_inner(step, &mut dummy);
     }
 
     fn eval_parts(&mut self, parts: &[StrPart]) -> String {
