@@ -317,6 +317,79 @@ mod tests {
     }
 
     #[test]
+    fn test_break_outside_loop_line_number() {
+        let src = r#"OnBoot => {
+    湊: 1行目
+    break
+}"#;
+        let (talks, funcs) = parse_talks_and_funcs(src);
+        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+        for t in &talks {
+            talk_map.entry(t.event.clone()).or_default().push(t.clone());
+        }
+        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
+        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
+
+        let errors = Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs);
+
+        let error = errors.iter()
+            .find(|e| e.message.contains("break"))
+            .expect("ループ外breakのエラーが見つからない");
+        assert_eq!(error.line, 3, "breakの行番号が実際のbreak文の行(3行目)と一致しない: {:?}", errors);
+    }
+
+    #[test]
+    fn test_continue_outside_loop_line_number_survives_dialogue_merge() {
+        // セリフ行の結合を挟んでも、ループ外continueのAnalyzeError.lineが
+        // preprocessによる行結合の影響を受けず、元ソースの実際の行番号を指すこと。
+        let src = r#"OnBoot => {
+    湊: 1行目
+    湊: 2行目
+    湊: 3行目
+    continue
+}"#;
+        let (talks, funcs) = parse_talks_and_funcs(src);
+        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+        for t in &talks {
+            talk_map.entry(t.event.clone()).or_default().push(t.clone());
+        }
+        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
+        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
+
+        let errors = Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs);
+
+        let error = errors.iter()
+            .find(|e| e.message.contains("continue"))
+            .expect("ループ外continueのエラーが見つからない");
+        assert_eq!(error.line, 5, "continueの行番号が実際のcontinue文の行(5行目)と一致しない: {:?}", errors);
+    }
+
+    #[test]
+    fn test_break_inside_while_no_error() {
+        // ループ内のbreakはそもそもエラーにならないことの回帰確認
+        // （loop_depthの管理がSpanned導入で崩れていないか）
+        let src = r#"OnBoot => {
+    while (true) {
+        break
+    }
+}"#;
+        let (talks, funcs) = parse_talks_and_funcs(src);
+        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+        for t in &talks {
+            talk_map.entry(t.event.clone()).or_default().push(t.clone());
+        }
+        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
+        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
+
+        let errors = Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs);
+
+        assert!(
+            !errors.iter().any(|e| e.message.contains("break")),
+            "ループ内のbreakが誤ってエラーになっている: {:?}", errors
+        );
+    }
+
+    #[test]
     fn test_local_func_scoped_to_its_own_talk_only() {
         // OnBootの中だけで定義したローカル関数を、
         // 別のtalk(OnClose)からcallした場合は引き続きnoticeが出ること
