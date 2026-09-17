@@ -5,9 +5,10 @@ edition = "2021"
 license = "MIT"
 
 # SSP向けDLLとして出力
+# rlibはsrc/bin配下のCLIツールやtests/配下の結合テストからlibをuseするために必要
 [lib]
 name = "minato"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -2,13 +2,14 @@
 // SSPとのDLL連携
 #[macro_use]
 mod log;
-mod sstp; 
-mod parser;
+mod sstp;
+// SSPなしで動くCLI構文チェッカー（src/bin/minato_check.rs）から使うためpub
+pub mod parser;
 mod codegen;
 mod config;
 mod runtime;
 mod saori;
-mod analyzer;
+pub mod analyzer;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_long;
