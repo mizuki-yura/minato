@@ -4,6 +4,7 @@
 
 湊はSSPから `OnMinuteChange` イベントを受け取るたびに、
 一定時間が経過していれば `OnRandomTalk` を実行します。
+（`OnMinuteChange` は湊が内部で使うため、台本に `OnMinuteChange => { ... }` を書いても呼ばれません）
 
 時間の間隔は `config.toml` で設定できます。
 
@@ -15,11 +16,15 @@ talk_jitter_secs = 180     # ゆらぎ（秒）
 
 この例では300〜480秒のランダムな間隔でランダムトークが発火します。
 
+初回起動後は `save.json` の `system.talk_interval` / `system.talk_jitter` が `config.toml` より優先されます。
+詳しくは[設定（config.toml）](../config/config.md)を参照してください。
+
 ## 手動でのランダムトーク
 
 SSPのメニューや `\a` タグからユーザーが手動でトークを要求すると
 `OnAITalk` イベントが発生します。
 湊は `OnAITalk` を `OnRandomTalk` として処理します。
+手動のトークも `OnRandomTalk => { ... }` に書いてください（`OnAITalk => { ... }` は呼ばれません）。
 
 ## トーク選択の流れ
 

@@ -39,8 +39,17 @@ OnRandomTalk => {
 |---|---|
 | `OnBoot` | 起動時 |
 | `OnClose` | 終了時 |
-| `OnRandomTalk` | 定期的なランダムトーク |
-| `OnAITalk` | ユーザーが手動でトークを要求したとき |
+| `OnRandomTalk` | 定期的なランダムトーク、およびユーザーが手動でトークを要求したとき |
 | `OnMouseDoubleClick` | ダブルクリック時 |
 
 SSPが送るイベントはSSPのドキュメントを参照してください。
+
+### 湊が読み替える・内部で使うイベント
+
+次の2つはSSPから届いたあと湊が内部で処理するため、`OnAITalk => { ... }` や
+`OnMinuteChange => { ... }` と書いても**呼ばれません**。
+
+| SSPのイベント | 湊での扱い |
+|---|---|
+| `OnAITalk` | `OnRandomTalk` に読み替えて実行されます。手動トークも定期トークも `OnRandomTalk => { ... }` に書いてください |
+| `OnMinuteChange` | 湊が時刻の取得とランダムトークの発火判定に内部で使います。間隔が経過していれば `OnRandomTalk` が実行されます。`OnMinuteChange` 自体を台本で受け取ることはできません |

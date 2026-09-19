@@ -21,7 +21,7 @@ ghost/master/
 
 ```toml
 [characters]
-湊 = "\\0"
+"湊" = "\\0"
 ```
 
 キャラクター名とSAKURAスクリプトのタグを対応させます。
@@ -29,9 +29,12 @@ ghost/master/
 
 ```toml
 [characters]
-湊 = "\\0"
-助手 = "\\1"
+"湊" = "\\0"
+"助手" = "\\1"
 ```
+
+日本語のキャラクター名は、TOMLの仕様上キー名を `"湊"` のように引用符で囲む必要があります。
+引用符なしの `湊 = "\\0"` と書くと `config.toml` のパースに失敗し、ゴーストが起動しません。
 
 ## main.mnt の最小構成
 
@@ -54,3 +57,6 @@ SSPでゴーストをロードして起動セリフが出れば成功です。
 [settings]
 debug_log = true
 ```
+
+2回目以降の起動では `save.json` の `system.debug_log` が `config.toml` より優先されます。
+詳しくは[設定（config.toml）](../config/config.md)を参照してください。

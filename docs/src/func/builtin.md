@@ -73,10 +73,14 @@ let n = count(to_lower("Pineapple"), "p")
 ```
 OnBoot => {
     let s = "2026年1月1日"
-    let caps = regex_captures(s, "(\\d+)年(\\d+)月(\\d+)日")
+    let caps = regex_captures(s, "(\d+)年(\d+)月(\d+)日")
     湊: ${caps[1]}年${caps[2]}月${caps[3]}日ですね。
 }
 ```
+
+湊の文字列リテラルの中では `\` はそのまま1文字として扱われます。
+正規表現の `\d` などは `\\d` ではなく `\d` と書いてください
+（`\\d` と書くと `\` が2文字残り、意図したパターンに一致しません）。
 
 ## 配列
 

@@ -22,6 +22,9 @@ main.mntの3行目: ブロックを「}」で閉じてください（「{」付�
 debug_log = true
 ```
 
+2回目以降の起動では `save.json` の `system.debug_log` が `config.toml` より優先されます。
+詳しくは[設定（config.toml）](../config/config.md)を参照してください。
+
 ## 静的チェック
 
 パースが成功した後、以下のチェックが行われます。
