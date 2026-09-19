@@ -908,10 +908,16 @@ let expr_stmt = ident()
                 .at_least(1)
                 .collect::<String>()
                 .validate(|s, e, emitter| {
-                    emitter.emit(Rich::custom(
-                        e.span(),
-                        format!("認識できない文です: 「{}」", s),
-                    ));
+                    let name = s.trim();
+                    let msg = if !name.is_empty() && name.chars().all(is_ident_char) {
+                        format!(
+                            "認識できない文です: 「{0}」。関数やトークを呼び出すなら「{0}()」または「call {0}」、セリフなら「キャラ名: {0}」と書いてください",
+                            name
+                        )
+                    } else {
+                        format!("認識できない文です: 「{}」", s)
+                    };
+                    emitter.emit(Rich::custom(e.span(), msg));
                     Stmt::Let("__skip__".to_string(), Expr::Str(s))
                 })
         ))
@@ -1907,4 +1913,31 @@ fn test_rich_to_japanese_resolves_line_after_dialogue_merge() {
         "preprocess後にズレた行番号ではなく元ソースの4行目が報告されるべき: {}",
         msg
     );
+}
+
+#[cfg(test)]
+fn unrecognized_stmt_message(line: &str) -> String {
+    let src = format!("OnBoot => {{\n    {}\n}}", line);
+    let pre = preprocess(&src).expect("preprocess failed");
+    let errors = program_with_include()
+        .parse(&*pre.src)
+        .into_result()
+        .expect_err("不明な行は構文エラーになるはず");
+    let msg = rich_to_japanese(&errors[0], &pre, "main.mnt");
+    assert!(msg.contains("認識できない文です"), "{}", msg);
+    msg
+}
+
+#[test]
+fn test_bare_identifier_line_hints_call_syntax() {
+    let msg = unrecognized_stmt_message("hoge");
+    assert!(msg.contains("hoge()"), "{}", msg);
+    assert!(msg.contains("call hoge"), "{}", msg);
+}
+
+#[test]
+fn test_unknown_line_with_symbols_has_no_hint() {
+    let msg = unrecognized_stmt_message("hoge fuga +");
+    assert!(!msg.contains("hoge()"), "{}", msg);
+    assert!(!msg.contains("call"), "{}", msg);
 }

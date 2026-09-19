@@ -1417,6 +1417,20 @@ Stmt::While(cond, body) => {
 
             Stmt::Call(expr) => {
                 append_log!(format!("funcs keys:{:?}", self.env.funcs.keys().collect::<Vec<_>>()));
+                // 文位置の hoge(args) は call hoge と同じ挙動（出力を out に流す）。
+                // 解決順は eval_expr_full と揃えて「ユーザー関数→talk→組み込み」。
+                if let Expr::Call(fname, args) = expr {
+                    if self.env.funcs.contains_key(fname.as_str()) {
+                        let vals: Vec<Value> = args.iter().map(|a| self.eval_expr_full(a)).collect();
+                        self.call_func_stmt(fname, vals, out);
+                    } else if self.talks.contains_key(fname.as_str()) {
+                        self.call_talk_stmt(fname, out);
+                    } else {
+                        // 組み込み関数: 副作用目的。戻り値は捨てる。
+                        self.eval_expr_full(expr);
+                    }
+                    return None;
+                }
                 let name = match expr {
                     Expr::Var(path) => {
                         let val = self.eval_expr_full(&Expr::Var(path.clone()));
@@ -1428,55 +1442,11 @@ Stmt::While(cond, body) => {
                     _ => self.eval_expr_full(expr).to_display(),
                 };
 
-                
-
                 if self.env.funcs.contains_key(&name) {
                     self.call_func_stmt(&name, vec![], out);
-} else if let Some(candidates) = self.talks.get(&name).cloned() {
-    if !candidates.is_empty() {
-        if self.env.call_depth > 100 {
-            append_log!(format!("talk call depth limit: {}", name));
-            return None;
-        }
-        self.env.call_depth += 1;
-let alive = self.filter_alive(&candidates);
-
-        if alive.is_empty() {
-            self.env.call_depth -= 1;
-            // gen_event（SSPからのイベント）の全滅は時間帯cond等で
-            // 日常的に起こる正常系だが、call は作者が「ここで喋る」と
-            // 明示した場所なので、無言になったら知らせる。
-            self.errors.push((
-                "notice".to_string(),
-                format!("call「{}」の候補が全てcondで除外され、何も出力されませんでした", name)
-            ));
-        } else {
-            match self.selector.select_alive(&name, &alive) {
-                Some(t) => {
-                    let talk = t.clone();
-                    append_log!(format!("enter talk (call): {}", talk.event));
-                    self.env.push_scope();
-
-                    let result = self.run_stmts(&talk.body, out);
-                    self.env.pop_scope();
-                    self.env.call_depth -= 1;
-
-                    if let Some(FlowControl::Return(val)) = result {
-                        append_log!(format!("call return val: {:?}", val.to_display()));
-                        out.push_str(&val.to_display());
-                    }
+                } else if self.talks.contains_key(&name) {
+                    self.call_talk_stmt(&name, out);
                 }
-                None => {
-                    self.env.call_depth -= 1;
-                    self.errors.push((
-                        "notice".to_string(),
-                        format!("call「{}」の候補選択に失敗し、何も出力されませんでした", name)
-                    ));
-                }
-            }
-        }
-    }
-}
                 None
             }
 
@@ -2238,6 +2208,55 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
         } else { self.env.call_depth -= 1; Value::Null }
     }
 
+    /// 文位置のtalk呼び出し（`call hoge` / `hoge()`）。出力は out に流す。
+    fn call_talk_stmt(&mut self, name: &str, out: &mut String) {
+        let candidates = match self.talks.get(name).cloned() {
+            Some(c) if !c.is_empty() => c,
+            _ => return,
+        };
+        if self.env.call_depth > 100 {
+            append_log!(format!("talk call depth limit: {}", name));
+            return;
+        }
+        self.env.call_depth += 1;
+        let alive = self.filter_alive(&candidates);
+
+        if alive.is_empty() {
+            self.env.call_depth -= 1;
+            // gen_event（SSPからのイベント）の全滅は時間帯cond等で
+            // 日常的に起こる正常系だが、call は作者が「ここで喋る」と
+            // 明示した場所なので、無言になったら知らせる。
+            self.errors.push((
+                "notice".to_string(),
+                format!("call「{}」の候補が全てcondで除外され、何も出力されませんでした", name)
+            ));
+            return;
+        }
+        match self.selector.select_alive(name, &alive) {
+            Some(t) => {
+                let talk = t.clone();
+                append_log!(format!("enter talk (call): {}", talk.event));
+                self.env.push_scope();
+
+                let result = self.run_stmts(&talk.body, out);
+                self.env.pop_scope();
+                self.env.call_depth -= 1;
+
+                if let Some(FlowControl::Return(val)) = result {
+                    append_log!(format!("call return val: {:?}", val.to_display()));
+                    out.push_str(&val.to_display());
+                }
+            }
+            None => {
+                self.env.call_depth -= 1;
+                self.errors.push((
+                    "notice".to_string(),
+                    format!("call「{}」の候補選択に失敗し、何も出力されませんでした", name)
+                ));
+            }
+        }
+    }
+
     fn call_func_stmt(&mut self, name: &str, args: Vec<Value>, out: &mut String) {
     if self.env.call_depth > 100 { append_log!("call depth limit exceeded"); return; }
     self.env.call_depth += 1;
@@ -2700,6 +2719,126 @@ OnBoot => {
 
     // 151回 call しているので「呼ばれた」も151回出るはず
     assert_eq!(out.matches("呼ばれた").count(), 151);
+}
+
+/// talk定義を全て登録したCodegenで OnBoot を生成し、(出力, Codegen) を返す
+fn run_boot_with_talks(src: &str) -> (String, Codegen) {
+    let talks = parse_talks(src);
+    let mut chars = HashMap::new();
+    chars.insert("湊".to_string(), "\\0".to_string());
+    let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+    for t in &talks {
+        talk_map.entry(t.event.clone()).or_default().push(t.clone());
+    }
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
+    let boot = talks.iter().find(|t| t.event == "OnBoot").unwrap();
+    let out = cg.gen_talk(boot, &HashMap::new(), FIXED_TIME);
+    (out, cg)
+}
+
+#[test]
+fn test_stmt_paren_call_func_outputs_like_call() {
+    let with_call = make_gen().gen_talk(&parse_talks(r#"OnBoot => {
+    func 挨拶する() {
+        湊: こんにちは
+    }
+    call 挨拶する
+}"#)[0], &HashMap::new(), FIXED_TIME);
+    let with_paren = make_gen().gen_talk(&parse_talks(r#"OnBoot => {
+    func 挨拶する() {
+        湊: こんにちは
+    }
+    挨拶する()
+}"#)[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(with_paren, "\\0こんにちは\\e");
+    assert_eq!(with_paren, with_call);
+}
+
+#[test]
+fn test_stmt_paren_call_func_passes_args() {
+    let src = r#"OnBoot => {
+    func add(a, b) {
+        湊: ${a}と${b}
+    }
+    add(1, 2)
+}"#;
+    let out = make_gen().gen_talk(&parse_talks(src)[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\01と2\\e");
+}
+
+#[test]
+fn test_stmt_paren_call_talk_outputs_like_call() {
+    let src = |call: &str| format!(r#"
+target_talk => {{
+    湊: 呼ばれた
+}}
+OnBoot => {{
+    {}
+}}
+"#, call);
+    let (paren, cg) = run_boot_with_talks(&src("target_talk()"));
+    let (with_call, _) = run_boot_with_talks(&src("call target_talk"));
+    assert_eq!(paren, "\\0呼ばれた\\e");
+    assert_eq!(paren, with_call);
+    assert!(cg.errors.iter().all(|(l, _)| l != "notice"), "{:?}", cg.errors);
+}
+
+#[test]
+fn test_stmt_paren_call_talk_all_excluded_emits_same_notice_as_call() {
+    let src = |call: &str| format!(r#"
+target_talk if(false) => {{
+    湊: 出ないはず
+}}
+OnBoot => {{
+    {}
+}}
+"#, call);
+    let (_, cg_paren) = run_boot_with_talks(&src("target_talk()"));
+    let (_, cg_call) = run_boot_with_talks(&src("call target_talk"));
+    let notices = |cg: &Codegen| -> Vec<String> {
+        cg.errors.iter()
+            .filter(|(l, m)| l == "notice" && m.contains("候補が全てcondで除外"))
+            .map(|(_, m)| m.clone())
+            .collect()
+    };
+    assert_eq!(notices(&cg_paren).len(), 1, "{:?}", cg_paren.errors);
+    assert_eq!(notices(&cg_paren), notices(&cg_call));
+}
+
+#[test]
+fn test_stmt_paren_call_builtin_does_not_pollute_output() {
+    let src = r#"OnBoot => {
+    log('x')
+    湊: あ
+}"#;
+    let out = make_gen().gen_talk(&parse_talks(src)[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\0あ\\e");
+}
+
+#[test]
+fn test_expr_position_call_still_returns_value_once() {
+    let src = r#"OnBoot => {
+    func hoge() {
+        return 'X'
+    }
+    湊: ${hoge()}
+    let v = hoge()
+    湊: ${v}
+}"#;
+    let out = make_gen().gen_talk(&parse_talks(src)[0], &HashMap::new(), FIXED_TIME);
+    // 各 hoge() の戻り値が1回ずつだけ出る（二重にならない）
+    assert_eq!(out, "\\0XX\\e");
+}
+
+#[test]
+fn test_call_without_paren_unchanged_for_undefined_name() {
+    // call hoge は従来どおり、未定義なら何も出さない
+    let src = r#"OnBoot => {
+    call 存在しない
+    湊: あ
+}"#;
+    let out = make_gen().gen_talk(&parse_talks(src)[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\0あ\\e");
 }
 
 
