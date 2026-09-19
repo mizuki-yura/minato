@@ -43,3 +43,23 @@ md# 湊ドキュメント
 - [エラーと対処](error/index.md)
   - [パースエラーの読み方](error/parse.md)
   - [よくあるミス](error/common.md)
+
+# 移行ガイド
+
+- [里々・YAYAから湊への移行](migration/index.md)
+  - [1. 非互換一覧](migration/cheatsheet.md)
+  - [2. 最小ゴーストの移植](migration/minimal.md)
+  - [3. イベント](migration/events.md)
+  - [4. トーク](migration/talks.md)
+  - [5. 変数](migration/variables.md)
+  - [6. 単語群](migration/wordgroups.md)
+  - [7. 選択肢・条件分岐・ウェイト](migration/choices.md)
+  - [8. SAORI呼び出し](migration/saori.md)
+  - [9. セーブデータの移行と型の違い](migration/savedata.md)
+  - [10. 文字コード・改行・エスケープ](migration/encoding.md)
+  - [11. 里々／YAYAにあるが湊にない機能](migration/missing.md)
+  - [12. 湊だけで簡単になる書き方](migration/easier.md)
+  - [13. 段階移行 vs 全置換](migration/strategy.md)
+  - [14. FAQ: 見た目は同じで結果が違う](migration/faq.md)
+  - [15. 三方式の比較](migration/comparison.md)
+  - [付録A. YAYAから来た方へ](migration/yaya.md)
