@@ -2,8 +2,7 @@
 target/
 *.log
 save.json
-*コピー*
-*.txt
+
 # OS
 .DS_Store
 Thumbs.db
@@ -11,11 +10,24 @@ Thumbs.db
 *.tmp
 *.swp
 *.pdb
+
 # エディタ
 .vscode/
 .claude/
 
-#ブック
+# ドキュメントのビルド成果物
+docs/book/
+
+# 配布用ビルド成果物
+tools/minato_check.exe
+tools/minato_check.zip
+
+# 作業用の退避ファイル
+parser_original.rs
+runtime_original.rs
+lib_original.rs
+codegen_original.rs
+analyzer_original.rs
 docs/book/
 
 # 配布用ビルド成果物（tools/minato_check.bat と組み合わせて配る用。ビルドして各自生成する）
