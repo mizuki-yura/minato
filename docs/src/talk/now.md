@@ -55,3 +55,35 @@ OnMouseDoubleClick => {
 ```
 
 どのイベントでどの `reference` が渡されるかはSSPのドキュメントを参照してください。
+
+## status
+
+`status` は、SSPがイベントと一緒に送る `Status` ヘッダの内容を持つマップです。
+ゴーストの今の状態を、トークの中で判定できます。
+
+| キー | 内容 |
+|---|---|
+| `status.talking` | 発話中か |
+| `status.choosing` | 選択肢の表示中か |
+| `status.minimizing` | 最小化中か |
+| `status.induction` | 誘導中か |
+| `status.passive` | パッシブモードか |
+| `status.timecritical` | タイムクリティカルな状態か |
+| `status.nouserbreak` | ユーザーによる中断ができない状態か |
+| `status.online` | オンライン状態か |
+| `status.raw` | `Status` ヘッダの元の文字列 |
+
+`raw` 以外は `true` / `false` です。`Status` ヘッダにそのフラグが含まれていれば `true` になります。
+ヘッダがないイベントでは、すべて `false` です（前のイベントの値は持ち越されません）。
+
+```
+OnRandomTalk => {
+    if (status.minimizing) {
+        // 最小化中は何も喋らない
+        return
+    }
+    湊: こんにちは。
+}
+```
+
+各フラグの意味の詳細は、SSPのドキュメントの `Status` ヘッダの項を参照してください。

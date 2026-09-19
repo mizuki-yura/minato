@@ -6,11 +6,13 @@
 ## 基本
 
 ```
-include "talks/random.mnt"
-include "talks/boot.mnt"
+include "random.mnt"
+include "boot.mnt"
 ```
 
 `main.mnt` の先頭に書くのが一般的です。
+`main.mnt` は `talks/` フォルダの中にあるので、`talks/` は付けずに、`main.mnt` と同じフォルダからの相対パスで書きます。
+`include "talks/random.mnt"` と書くと `talks/talks/random.mnt` を探してしまい、読み込みエラーになります。
 
 ## ファイル構成の例
 
@@ -34,7 +36,7 @@ include "func.mnt"
 
 ## 注意
 
-- パスは `talks/` フォルダからの相対パスです
+- パスは、`include` を書いたファイルがあるフォルダからの相対パスです。`main.mnt` から書くときは `talks/` フォルダが基準ですが、サブフォルダの中のファイルから `include` するときは、そのサブフォルダが基準になります（たとえば `talks/sub/a.mnt` の中の `include "b.mnt"` は `talks/sub/b.mnt` を読み込みます）
 - 同じファイルを複数回includeしても1回だけ読み込まれます
 - includeは再帰的に使えます（includeしたファイルの中でincludeできます）
 

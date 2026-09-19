@@ -123,7 +123,7 @@ OnBoot => {
 ```
 
 - 文字コードの既定は UTF-8 です。Shift_JIS のファイルは、`file_read(パス, "sjis")` で読めます。
-- `talks` の中、`config.toml`、`save.json`、`.dll`、`minato_` で始まるファイルには書き込めません。
+- `talks` の中、`config.toml`、`descript.txt`、`save.json` で始まるファイル（`save.json.bak` なども含む）、`.dll`、`minato_` で始まるファイルには書き込めません。詳しくは[ビルトイン関数の「ファイル操作」](../func/builtin.md#ファイル操作)を参照してください。
 - 1MBを超えるファイルは読めません。
 - 書き込みは、途中で落ちても既存のファイルが壊れないように、一時ファイルを経由します（`file_append` を除く）。
 

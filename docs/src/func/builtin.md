@@ -14,9 +14,9 @@
 | `clamp(n, lo, hi)` | 範囲内に収める | `clamp(15, 0, 10)` → `10` |
 | `sqrt(n)` | 平方根 | `sqrt(4)` → `2` |
 | `rand()` | ランダムな整数 | `rand() % 6` → `0`〜`5` |
-| `PI` | 円周率 | `PI` → `3.14159...` |
+| `PI()` | 円周率（括弧が必要。`PI` だけでは値になりません） | `PI()` → `3.14159...` |
 | `to_rad(deg)` | 度をラジアンに変換 | `to_rad(180)` → `3.14159...` |
-| `to_deg(rad)` | ラジアンを度に変換 | `to_deg(PI)` → `180` |
+| `to_deg(rad)` | ラジアンを度に変換 | `to_deg(PI())` → `180` |
 | `to_hex(n)` | 16進数文字列に変換 | `to_hex(255)` → `"ff"` |
 | `to_hex(n, digits)` | 桁数指定で16進数に変換 | `to_hex(255, 4)` → `"00ff"` |
 
@@ -118,12 +118,19 @@ OnBoot => {
 | `values(map)` | 値の配列を返す | |
 | `delete(map, key)` | キーを除いた新しいマップを返す | |
 | `len(map)` | キーの数 | |
+| `get(map, key, default)` | キーの値を返す。なければ `default`（省略時は `null`） | `get(data, "age", 0)` |
+
+`get` は配列にも使えます（`get(arr, 添字, default)`）。範囲外の添字や負の添字でも警告を出さず、`default` を返します。
+`data["age"]` のように直接参照すると、存在しないキーや範囲外の添字では通知や警告が出ます。
 
 ## 日付・時刻
 
 | 関数 | 説明 |
 |---|---|
 | `days_since(year, month, day)` | 指定した日から今日までの日数 |
+| `days_between(y1, m1, d1, y2, m2, d2)` | 1つ目の日から2つ目の日までの日数（2つ目のほうが後なら正の数） |
+
+存在しない日付（`2026, 2, 30` など）を渡すと、どちらも `null` を返します。
 
 ```
 OnBoot => {
@@ -136,7 +143,13 @@ OnBoot => {
 
 | 関数 | 説明 | 例 |
 |---|---|---|
-| `choose(cond, a, b)` | condが真なら`a`、偽なら`b` | `choose(flag, "はい", "いいえ")` |
+| `choose(cond, a, b)` | condが真なら`a`、偽なら`b`（選ばれなかった側の式は評価されません） | `choose(flag, "はい", "いいえ")` |
+| `is_null(v)` | `v` が `null` か | `is_null(save.名前)` → `true` |
+| `talk_exists(name)` | その名前のトークまたは関数が定義されているか | `talk_exists("挨拶")` → `true` |
+| `log(v, ...)` | 値をログに書き出す（戻り値は `null`） | `log("起動しました")` |
+
+`log` は、`debug_log` が有効なときだけ、ゴーストフォルダの `minato_debug.log` に `[SCRIPT] メッセージ` の形で書き込みます。
+複数の値を渡すと `, ` でつないで1行にします。無効なときは何もしません。
 
 ## システム連携
 
@@ -146,3 +159,31 @@ OnBoot => {
 | `saori(dll, arg0, arg1, ...)` | SAORIを呼び出す |
 
 `saori` の詳細は[SAORI連携](../saori/saori.md)を参照してください。
+
+## ファイル操作
+
+| 関数 | 説明 | 戻り値 |
+|---|---|---|
+| `file_read(path, enc)` | テキストファイルを読み込む | 内容の文字列。失敗したら `null` |
+| `file_write(path, text, enc)` | ファイルに書き込む（既存の内容は置き換え） | 成功したら `true`、失敗したら `false` |
+| `file_append(path, text, enc)` | ファイルの末尾に追記する（なければ作る） | 成功したら `true`、失敗したら `false` |
+| `file_move(from, to, overwrite)` | ファイルを移動（名前変更）する | 成功したら `true`、失敗したら `false` |
+
+```
+OnBoot => {
+    let ok = file_write("ghost/master/memo.txt", "こんにちは")
+    湊: ${ok}|${file_read("ghost/master/memo.txt")}
+}
+```
+
+- `path` は、ゴーストのホーム（`ghost` フォルダの1つ上）からの相対パスで書きます。`/` でも `\` でも構いません。ドライブ指定・絶対パス・`..` を含むパスは使えません。
+- `enc`（文字コード）は省略でき、既定は UTF-8 です。Shift_JIS のファイルは `"sjis"` を指定します（`"utf8"` も指定できます）。
+- `file_read` で読めるのは 1MB までです。それを超えるファイルや、UTF-8 として読めないファイルは `null` になります。
+- 書き込みできるのは `ghost/master` の中だけです。次のものには書き込めません（`file_move` の移動元・移動先も同じです）。
+  - `talks` フォルダの中（台本）
+  - `config.toml`、`descript.txt`、`save.json` で始まるファイル
+  - `.dll` ファイル
+  - `minato_` で始まるファイル
+- `file_move` は、移動先に同名のファイルがあると、既定では移動せず `false` を返します。上書きするには、第3引数に `true` を指定します。フォルダは移動できません。
+- `file_write` は一時ファイルを経由して書き込むので、途中で落ちても既存のファイルが壊れません（`file_append` は直接追記します）。
+- 失敗したときは、応答の `ErrorLevel` / `ErrorDescription` に警告が載ります。禁止されたパスを指定した場合は、警告ではなくエラーになります。

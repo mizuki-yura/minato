@@ -55,10 +55,10 @@ OnBoot => {
 
 ```
 func check() {
-    if (save.フラグ == false) {
+    if (!save.フラグ) {
         return
     }
-    // フラグが true のときだけここに来る
+    // フラグが真のとき（true、0以外の数値、空でない文字列など）だけここに来る
     global save.カウント += 1
 }
 ```

@@ -46,10 +46,27 @@ SSPが送るイベントはSSPのドキュメントを参照してください�
 
 ### 湊が読み替える・内部で使うイベント
 
-次の2つはSSPから届いたあと湊が内部で処理するため、`OnAITalk => { ... }` や
-`OnMinuteChange => { ... }` と書いても**呼ばれません**。
+次の3つはSSPから届いたあと湊が内部で処理するため、`OnAITalk => { ... }`、
+`OnMinuteChange => { ... }`、`OnGotVirtualTime => { ... }` と書いても**呼ばれません**。
 
 | SSPのイベント | 湊での扱い |
 |---|---|
 | `OnAITalk` | `OnRandomTalk` に読み替えて実行されます。手動トークも定期トークも `OnRandomTalk => { ... }` に書いてください |
-| `OnMinuteChange` | 湊が時刻の取得とランダムトークの発火判定に内部で使います。間隔が経過していれば `OnRandomTalk` が実行されます。`OnMinuteChange` 自体を台本で受け取ることはできません |
+| `OnMinuteChange` | 湊が時刻の取得とランダムトークの発火判定に内部で使います。間隔が経過していて、かつSSPがトークを再生できる状態（`Reference3` が `1`）であれば `OnRandomTalk` が実行されます。`OnMinuteChange` 自体を台本で受け取ることはできません |
+| `OnGotVirtualTime` | 湊が現在時刻（SSPの仮想時刻）を受け取るために内部で使います。受け取った時刻は `now` に反映されます。台本で受け取ることはできません |
+
+湊は、`OnBoot` と `OnMinuteChange` への応答の末尾に、SSPへ時刻を問い合わせる `\![get,property,OnGotVirtualTime,...]` を自動で付け足します。
+そのSSPからの返事が `OnGotVirtualTime` です。台本に書く必要はありません。
+
+### SSPのリソース要求（version / craftman）
+
+SSPは、イベントのほかに、`On` で始まらないID（リソース）でSHIORIに問い合わせることがあります。
+湊は、次の2つにだけ、台本とは関係なく固定の値で答えます。
+
+| リソースID | 湊の応答 |
+|---|---|
+| `version` | 湊のバージョン（例: `0.1.0`） |
+| `craftman` | `mizuki` |
+
+これらはゴーストの読み込み前後でも答えます。台本で `version => { ... }` のように書いても、値を変えることはできません。
+それ以外の `On` で始まらないリソース（`homeurl` や `sakura.name` など）には、何も返しません（204）。
