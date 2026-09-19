@@ -569,40 +569,6 @@ let without_chara = surface()
 // ── path_segments / assign_op（global・assignで共用）─────
 
 fn path_segments<'a>() -> impl Parser<'a, &'a str, Vec<PathSegment>, extra::Err<Rich<'a, char>>> + Clone {
-    let index_key = just('"')
-        .ignore_then(
-            just("\\\\").to(StrPart::Lit("\\\\".to_string()))
-                .or(
-                    just("${")
-                        .ignore_then(expr())
-                        .then_ignore(just('}').labelled("変数展開「${」は「}」で閉じてください"))
-                        .map(StrPart::Expr)
-                )
-                .or(
-                    just('\\')
-                        .then(
-                            any().filter(|&c: &char| c != '\r' && c != '\n' && c != '\\' && c != '"' && c != '$')
-                                .repeated()
-                                .at_least(1)
-                                .collect::<String>()
-                        )
-                        .map(|(bs, rest): (char, String)| {
-                            StrPart::Lit(std::iter::once(bs).chain(rest.chars()).collect())
-                        })
-                )
-                .or(
-                    any().filter(|&c: &char| c != '\r' && c != '\n' && c != '$' && c != '\\' && c != '"')
-                        .repeated()
-                        .at_least(1)
-                        .collect::<String>()
-                        .map(StrPart::Lit)
-                )
-                .repeated()
-                .collect::<Vec<_>>()
-        )
-        .then_ignore(just('"').labelled("インデックスキーの文字列は「\"」で閉じてください"))
-        .map(Expr::InterpolatedStr);
-
     ident().map(PathSegment::Key)
         .then(
             just('.')
@@ -610,11 +576,10 @@ fn path_segments<'a>() -> impl Parser<'a, &'a str, Vec<PathSegment>, extra::Err<
             .or(
                 just('[')
                     .ignore_then(ws())
-                    .ignore_then(
-                        index_key
-                            .or(str_lit())
-                            .or(number())
-                    )
+                    // 読み取り側(expr内のindexed)と同じく任意の式を受理する。
+                    // expr()は "..."(補間)・'...'・数値も含むので個別候補は不要
+                    // (number()等を先に置くと [i+1] のような式が途中で切れる)
+                    .ignore_then(expr())
                     .then_ignore(ws())
                     .then_ignore(just(']').labelled("インデックスアクセスは「]」で閉じてください"))
                     .map(PathSegment::Index)

@@ -3115,6 +3115,61 @@ fn test_global_index_expr_can_use_extended_builtins() {
     assert_eq!(out, "\\0剣\\e");
 }
 
+// 代入LHSの添字は読み取り側と同様に任意の式（裸の変数・演算・関数呼び出し）を受理する
+#[test]
+fn test_assign_index_accepts_bare_variable_key() {
+    let src = r#"OnBoot => {
+    global save.game.explored = {}
+    let idx = "a1"
+    save.game.explored[idx] = true
+    湊: ${save.game.explored.a1}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\0true\\e");
+}
+
+#[test]
+fn test_global_index_accepts_bare_variable_key() {
+    let src = r#"OnBoot => {
+    let idx = "k"
+    global save.items[idx] = "剣"
+    湊: ${save.items.k}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\0剣\\e");
+}
+
+#[test]
+fn test_assign_index_accepts_numeric_expression_key() {
+    let src = r#"OnBoot => {
+    let arr = [10, 20, 30]
+    let i = 0
+    arr[i + 1] = 99
+    arr[i] = 7
+    湊: ${arr[0]}/${arr[1]}/${arr[2]}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\07/99/30\\e");
+}
+
+#[test]
+fn test_assign_index_literal_keys_still_work() {
+    let src = r#"OnBoot => {
+    let m = {}
+    m['fixed'] = 1
+    m["s${1 + 1}"] = 2
+    let a = [0, 0]
+    a[1] = 5
+    湊: ${m.fixed}/${m.s2}/${a[1]}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\01/2/5\\e");
+}
+
 #[test]
 fn test_assign_index_expr_can_use_talk_exists() {
     let src = r#"
