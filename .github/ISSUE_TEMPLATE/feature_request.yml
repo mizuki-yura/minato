@@ -1,0 +1,15 @@
+name: 機能の要望
+description: こんな機能がほしい、という提案はこちら
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: どんなことをしたいですか
+      description: 里々やYAYAで書いていたことなど、具体例があると助かります。
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: 今はどうしていますか

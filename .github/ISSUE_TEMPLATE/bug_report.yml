@@ -1,0 +1,38 @@
+name: 不具合報告
+description: 湊の動作がおかしいときはこちら
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        報告ありがとうございます。分かる範囲で構いません。
+  - type: input
+    id: version
+    attributes:
+      label: 湊のバージョン
+      placeholder: "例: 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: ssp
+    attributes:
+      label: SSPのバージョン
+      placeholder: "例: 2.6.x"
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きましたか
+      description: 期待した動作と、実際の動作を教えてください。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現するスクリプト
+      description: 問題が出る最小の .mnt を貼ってください。
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: ログやエラーメッセージ
+      render: text
