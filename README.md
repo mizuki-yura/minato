@@ -37,5 +37,5 @@ target\i686-pc-windows-msvc\release\minato_check.exe "ゴーストのホーム�
 
 ## ライセンス
 
-MIT License（[LICENSE](./LICENSE)）  
-@自由に使用・改変・再配布できます。著作権表示を残してください。
+湊本体は MIT ライセンスです（`LICENSE` を参照）。
+依存クレートのライセンスは `THIRD-PARTY-LICENSES.toml` にまとめています。
