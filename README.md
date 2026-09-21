@@ -11,9 +11,17 @@ Rustで書かれた伺か/SSP用のSHIORIライブラリです。
 - パースエラーは日本語で行番号付きで表示
 - SAORIで外部DLLと連携可能
 
-## ドキュメント
+## ダウンロード
+dll、テンプレートゴースト、minato_check一式を含めた
+minato-x.x.x.zipは Release にあります。
 
+## ドキュメント
+湊の使い方はこちら
 https://mizuki-yura.github.io/minato/
+
+
+## バグ報告
+issueページのNew issueから行えます。
 
 ## CLI構文チェッカー（minato_check）
 

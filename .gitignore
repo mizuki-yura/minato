@@ -10,7 +10,8 @@ Thumbs.db
 *.tmp
 *.swp
 *.pdb
-
+*.zip
+*.nar
 # エディタ
 .vscode/
 .claude/
