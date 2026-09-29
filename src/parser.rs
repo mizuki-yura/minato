@@ -57,6 +57,8 @@ pub struct Line {
 pub struct Spanned<T> {
     pub node: T,
     pub line: u32,
+    /// 由来するファイル名（resolve_stmt_linesで設定。未設定なら空文字）
+    pub file: std::sync::Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -767,10 +769,10 @@ let while_loop = keyword("while")         // just("while") から変更
                         .ignore_then(
                             // 「else if ...」は入れ子のif_stmt（Stmt::If単体）を
                             // else_bodyのVec<Spanned<Stmt>>に合わせて1要素でラップする。
-                            // このSpannedのlineはIf自体の行であり、check_stmt側では
-                            // Stmt::Ifノード自体の行番号を参照しないため使われない
-                            // （実際に報告されるのは中のthen_body/else_body各文の行）。
-                            if_stmt.map(|s| vec![Spanned { node: s, line: 0 }]).or(block.clone()),
+                            // このSpannedのlineは、codegenでelse ifの条件式の
+                            // エラー位置として使われるため、本物のオフセットを持たせる
+                            // （resolve_stmt_linesが行番号に変換する）。
+                            if_stmt.map_with(|s, e: &mut chumsky::input::MapExtra<'a, '_, &'a str, extra::Err<Rich<'a, char>>>| vec![Spanned { node: s, line: e.span().start as u32, file: std::sync::Arc::from("") }]).or(block.clone()),
                         )
                         .or_not(),
                 )
@@ -890,7 +892,7 @@ let expr_stmt = ident()
         //   ひとまず持たせておく（この時点ではまだ「preprocess後の行番号」で
         //   「元ソースの行番号」ではない）。実際の行番号への変換は
         //   resolve_stmt_lines() でパース完了後にまとめて行う。
-        .map_with(|stmt, e| Spanned { node: stmt, line: e.span().start as u32 })
+        .map_with(|stmt, e| Spanned { node: stmt, line: e.span().start as u32, file: std::sync::Arc::from("") })
     })
 }
 
@@ -1318,7 +1320,7 @@ pub fn load_program(
                 .collect();
             LoadError::ParseError(msgs, entry.to_path_buf())
         })?;
-    resolve_program_item_lines(&mut items, src, &pre);
+    resolve_program_item_lines(&mut items, src, &pre, &file_name);
 
     append_log!("after parse");
 
@@ -1451,24 +1453,25 @@ fn line_at_offset(offset: u32, src: &str) -> u32 {
 
 /// Vec<Spanned<Stmt>>を再帰的に辿り、各Spanned.lineを
 /// 「preprocess後のバイトオフセット」から「元ソースの行番号」に書き換える。
-fn resolve_stmt_lines(stmts: &mut [Spanned<Stmt>], src: &str, pre: &PreprocessResult) {
+fn resolve_stmt_lines(stmts: &mut [Spanned<Stmt>], src: &str, pre: &PreprocessResult, file: &std::sync::Arc<str>) {
     for spanned in stmts.iter_mut() {
         let preprocessed_line = line_at_offset(spanned.line, src);
         spanned.line = pre.resolve_line(preprocessed_line);
+        spanned.file = file.clone();
         match &mut spanned.node {
             Stmt::If(_, then_body, else_body) => {
-                resolve_stmt_lines(then_body, src, pre);
+                resolve_stmt_lines(then_body, src, pre, file);
                 if let Some(eb) = else_body {
-                    resolve_stmt_lines(eb, src, pre);
+                    resolve_stmt_lines(eb, src, pre, file);
                 }
             }
             Stmt::For { body, .. }
             | Stmt::ForEach { body, .. }
-            | Stmt::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre),
-            Stmt::While(_, body) => resolve_stmt_lines(body, src, pre),
+            | Stmt::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre, file),
+            Stmt::While(_, body) => resolve_stmt_lines(body, src, pre, file),
             Stmt::Match { arms, .. } => {
                 for arm in arms.iter_mut() {
-                    resolve_stmt_lines(&mut arm.body, src, pre);
+                    resolve_stmt_lines(&mut arm.body, src, pre, file);
                 }
             }
             _ => {}
@@ -1478,11 +1481,13 @@ fn resolve_stmt_lines(stmts: &mut [Spanned<Stmt>], src: &str, pre: &PreprocessRe
 
 /// program_with_include()の結果全体について、含まれるTalk/FuncDefの
 /// 本体すべての行番号を元ソースの行番号に変換する。
-pub fn resolve_program_item_lines(items: &mut [ProgramItem], src: &str, pre: &PreprocessResult) {
+pub fn resolve_program_item_lines(items: &mut [ProgramItem], src: &str, pre: &PreprocessResult, file_name: &str) {
+    let file: std::sync::Arc<str> = std::sync::Arc::from(file_name);
+    let file = &file;
     for item in items.iter_mut() {
         match item {
-            ProgramItem::Talk(talk) => resolve_stmt_lines(&mut talk.body, src, pre),
-            ProgramItem::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre),
+            ProgramItem::Talk(talk) => resolve_stmt_lines(&mut talk.body, src, pre, file),
+            ProgramItem::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre, file),
             ProgramItem::Include(_) | ProgramItem::Global(_, _, _) => {}
         }
     }

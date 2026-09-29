@@ -227,7 +227,7 @@ mod tests {
     fn parse_talks_and_funcs(src: &str) -> (Vec<Talk>, Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>) {
         let pre = preprocess(src).expect("preprocess failed");
         let mut items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
-        resolve_program_item_lines(&mut items, &pre.src, &pre);
+        resolve_program_item_lines(&mut items, &pre.src, &pre, "main.mnt");
         let mut talks = vec![];
         let mut funcs = vec![];
         for item in items {
