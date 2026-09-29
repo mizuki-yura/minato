@@ -142,7 +142,9 @@ impl Env {
 /// 解決済みの文字列キー列でglobalsに書き込む。
 /// PathSegment::Indexの評価はCodegen::resolve_path_segmentsが
 /// eval_expr_fullで事前に済ませている想定。
-pub fn set_path_resolved(&mut self, path: &[String], op: &AssignOp, val: Value) {
+/// 代入できなかった添字の警告文を返す。
+pub fn set_path_resolved(&mut self, path: &[String], op: &AssignOp, val: Value) -> Vec<String> {
+    let mut warns = Vec::new();
     match path {
         [] => {}
         [key] => {
@@ -151,10 +153,11 @@ pub fn set_path_resolved(&mut self, path: &[String], op: &AssignOp, val: Value) 
         }
         [head, rest @ ..] => {
             let root = self.globals.remove(head).unwrap_or(Value::Null);
-            let updated = set_nested_str(root, rest, op, val);
+            let updated = set_nested_str(root, rest, op, val, &mut warns);
             self.globals.insert(head.clone(), updated);
         }
     }
+    warns
 }
 
 /// 旧API。PathSegment::Indexの評価はeval_expr(自由関数、builtinのみ)しか使えず、
@@ -167,12 +170,14 @@ pub fn set_path(&mut self, path: &[PathSegment], op: &AssignOp, val: Value) {
         PathSegment::Key(k) => k.clone(),
         PathSegment::Index(expr) => eval_expr(expr, &*self).to_display(),
     }).collect();
-    self.set_path_resolved(&resolved, op, val);
+    let _ = self.set_path_resolved(&resolved, op, val);
 }
 
 /// 解決済みの文字列キー列で代入する（globalキーワード無しのドット付き代入用）。
 /// headがどこかのローカルスコープにあればそのスコープ内を更新し、なければglobalsを更新する。
-pub fn set_var_path_resolved(&mut self, path: &[String], op: &AssignOp, val: Value) {
+/// 代入できなかった添字の警告文を返す。
+pub fn set_var_path_resolved(&mut self, path: &[String], op: &AssignOp, val: Value) -> Vec<String> {
+    let mut warns = Vec::new();
     match path {
         [] => {}
         [key] => {
@@ -182,16 +187,17 @@ pub fn set_var_path_resolved(&mut self, path: &[String], op: &AssignOp, val: Val
             for i in (0..self.locals.len()).rev() {
                 if self.locals[i].contains_key(head) {
                     let root = self.locals[i].remove(head).unwrap_or(Value::Null);
-                    let updated = set_nested_str(root, rest, op, val);
+                    let updated = set_nested_str(root, rest, op, val, &mut warns);
                     self.locals[i].insert(head.clone(), updated);
-                    return;
+                    return warns;
                 }
             }
             let root = self.globals.remove(head).unwrap_or(Value::Null);
-            let updated = set_nested_str(root, rest, op, val);
+            let updated = set_nested_str(root, rest, op, val, &mut warns);
             self.globals.insert(head.clone(), updated);
         }
     }
+    warns
 }
 
 
@@ -203,7 +209,7 @@ pub fn set_var_path(&mut self, path: &[PathSegment], op: &AssignOp, val: Value) 
         PathSegment::Key(k) => k.clone(),
         PathSegment::Index(expr) => eval_expr(expr, &*self).to_display(),
     }).collect();
-    self.set_var_path_resolved(&resolved, op, val);
+    let _ = self.set_var_path_resolved(&resolved, op, val);
 }
 
 
@@ -287,24 +293,26 @@ fn get_nested_str(val: Value, path: &[String]) -> Value {
     }
 }
 
-fn set_nested_str(val: Value, path: &[String], op: &AssignOp, new_val: Value) -> Value {
+fn set_nested_str(val: Value, path: &[String], op: &AssignOp, new_val: Value, warns: &mut Vec<String>) -> Value {
     match (val, path) {
         (v, []) => apply_op(v, op, new_val),
         (Value::Map(mut m), [key, rest @ ..]) => {
             let child = m.shift_remove(key).unwrap_or(Value::Null);
-            m.insert(key.clone(), set_nested_str(child, rest, op, new_val));
+            m.insert(key.clone(), set_nested_str(child, rest, op, new_val, warns));
             Value::Map(m)
         }
         (Value::Null, [key, rest @ ..]) => {
             let mut m = IndexMap::new();
-            m.insert(key.clone(), set_nested_str(Value::Null, rest, op, new_val));
+            m.insert(key.clone(), set_nested_str(Value::Null, rest, op, new_val, warns));
             Value::Map(m)
         }
         (Value::Array(mut arr), [key, rest @ ..]) => {
-            if let Ok(i) = key.parse::<usize>() {
-                if i < arr.len() {
-                    arr[i] = set_nested_str(arr[i].clone(), rest, op, new_val);
+            match key.parse::<usize>() {
+                Ok(i) if i < arr.len() => {
+                    arr[i] = set_nested_str(arr[i].clone(), rest, op, new_val, warns);
                 }
+                // 負数・小数・非数値キー・長さ以上はどれも代入されない
+                _ => warns.push(format!("配列の添字 {} は範囲外です（長さ {}）", key, arr.len())),
             }
             Value::Array(arr)
         }
@@ -1284,7 +1292,9 @@ Stmt::Global(path, op, expr) => {
     let resolved = self.resolve_path_segments(path);              // ★追加
     append_log!(format!("before history: save={:?}", self.env.globals.get("save")));
     append_log!(format!("set_path: {:?} {:?}", resolved, val));    // ★path→resolved
-    self.env.set_path_resolved(&resolved, op, val);                // ★set_path→set_path_resolved
+    for w in self.env.set_path_resolved(&resolved, op, val) {      // ★set_path→set_path_resolved
+        self.errors.push(("warning".to_string(), w));
+    }
     None
 }
 // codegen.rs — gen_stmt の Stmt::Assign
@@ -1295,7 +1305,9 @@ Stmt::Assign(path, op, expr) => {
         [PathSegment::Key(key)] => self.env.set_var(key, op, val),
         _ => {
             let resolved = self.resolve_path_segments(path);           // ★追加
-            self.env.set_var_path_resolved(&resolved, op, val);        // ★変更
+            for w in self.env.set_var_path_resolved(&resolved, op, val) {  // ★変更
+                self.errors.push(("warning".to_string(), w));
+            }
         }
     }
     None
@@ -3168,6 +3180,120 @@ fn test_assign_index_literal_keys_still_work() {
     let talks = parse_talks(src);
     let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\01/2/5\\e");
+}
+
+#[test]
+fn test_assign_2d_index_bare_variables() {
+    let src = r#"OnBoot => {
+    let map = [[0,0,0],[0,0,0]]
+    let y = 1
+    let x = 2
+    map[y][x] = 1
+    湊: ${map[1][2]}/${map[0][2]}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\01/0\\e");
+}
+
+#[test]
+fn test_assign_2d_index_expressions() {
+    let src = r#"OnBoot => {
+    let map = [[0,0,0],[0,0,0]]
+    let y = 0
+    let x = 2
+    map[y+1][x-1] = 5
+    湊: ${map[1][1]}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\05\\e");
+}
+
+#[test]
+fn test_assign_2d_index_compound() {
+    let src = r#"OnBoot => {
+    let map = [[0,0,0],[0,0,3]]
+    let y = 1
+    let x = 2
+    map[y][x] += 1
+    湊: ${map[1][2]}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\04\\e");
+}
+
+#[test]
+fn test_global_2d_index_bare_variables() {
+    let src = r#"OnBoot => {
+    global save.grid = [[0,0,0],[0,0,0]]
+    let y = 1
+    let x = 2
+    global save.grid[y][x] = 1
+    湊: ${save.grid[1][2]}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\01\\e");
+}
+
+#[test]
+fn test_assign_2d_index_numeric_literals() {
+    let src = r#"OnBoot => {
+    let map = [[0,0,0],[0,0,0]]
+    map[0][1] = 9
+    湊: ${map[0][1]}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\09\\e");
+}
+
+#[test]
+fn test_assign_array_index_out_of_range_warns() {
+    let src = r#"OnBoot => {
+    let a = [0, 0, 0]
+    a[3] = 1
+    a[-1] = 1
+    a[1.5] = 1
+    global save.g = [0]
+    global save.g[5] = 1
+    湊: ${a[0]}${a[1]}${a[2]}
+}"#;
+    let talks = parse_talks(src);
+    let mut cg = make_gen();
+    let out = cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\0000\\e");
+    for key in ["3", "-1", "1.5"] {
+        let msg = format!("配列の添字 {} は範囲外です（長さ 3）", key);
+        assert!(cg.errors.iter().any(|(l, m)| l == "warning" && *m == msg), "{}: {:?}", msg, cg.errors);
+    }
+    assert!(
+        cg.errors.iter().any(|(l, m)| l == "warning" && m == "配列の添字 5 は範囲外です（長さ 1）"),
+        "{:?}", cg.errors
+    );
+}
+
+#[test]
+fn test_assign_index_to_undefined_var_creates_map() {
+    // 現状の仕様の固定: 未定義の変数への添字代入は配列ではなくMapになる
+    let src = r#"OnBoot => {
+    let y = 1
+    let x = 2
+    m[y][x] = 1
+    湊: ok
+}"#;
+    let talks = parse_talks(src);
+    let mut cg = make_gen();
+    cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    let Some(Value::Map(outer)) = cg.env.globals.get("m") else {
+        panic!("mがMapになっていない: {:?}", cg.env.globals.get("m"));
+    };
+    let Some(Value::Map(inner)) = outer.get("1") else {
+        panic!("m[\"1\"]がMapになっていない: {:?}", outer);
+    };
+    assert!(matches!(inner.get("2"), Some(Value::Number(n)) if *n == 1.0), "{:?}", inner);
 }
 
 #[test]

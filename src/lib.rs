@@ -548,7 +548,9 @@ fn apply_top_globals(
     for (path, op, expr) in globals {
         let val = codegen.eval_expr_full(expr);
         let resolved = codegen.resolve_path_segments(path);
-        codegen.env.set_path_resolved(&resolved, op, val);
+        for w in codegen.env.set_path_resolved(&resolved, op, val) {
+            codegen.errors.push(("warning".to_string(), w));
+        }
         append_log!(format!("top-level global applied: {:?} {:?}", resolved, op));
     }
 }
