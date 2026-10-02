@@ -1310,13 +1310,13 @@ pub fn load_program(
         .to_string_lossy()
         .to_string();
 
-    let src = std::fs::read_to_string(entry)
+    let orig_text = std::fs::read_to_string(entry)
         .map_err(|e| LoadError::PreprocessError(
             Diagnostic::error(format!("ファイルが読み込めません: {}", e)).in_file(file_name.as_str())
         ))?;
 
     append_log!("before preprocess");
-    let pre = match preprocess(&src) {
+    let pre = match preprocess(&orig_text) {
         Ok(r) => r,
         Err(d) => return Err(LoadError::PreprocessError(d.in_file(file_name.as_str()))),
     };
@@ -1342,7 +1342,7 @@ pub fn load_program(
         .into_result()
         .map_err(|errors| {
             let diags: Vec<Diagnostic> = errors.iter()
-                .map(|e| rich_to_diagnostic(e, &pre, &file_name))
+                .map(|e| rich_to_diagnostic(e, &pre, &orig_text, &file_name))
                 .collect();
             LoadError::ParseError(diags, entry.to_path_buf())
         })?;
@@ -1374,82 +1374,102 @@ pub fn load_program(
 
 // ── エラーメッセージ日本語化 ──────────────────────────────
 
-fn rich_to_diagnostic(e: &Rich<char>, pre: &PreprocessResult, file_name: &str) -> Diagnostic {
-    let pos = e.span().start as u32;
-    let output_line = line_at_offset(pos, &pre.src);
+fn rich_to_diagnostic(e: &Rich<char>, pre: &PreprocessResult, orig_src: &str, file_name: &str) -> Diagnostic {
+    let pos = e.span().start.min(pre.src.len());
+    let output_line = line_at_offset(pos as u32, &pre.src);
     let line = pre.resolve_line(output_line);
-    let msg = reason_to_japanese(e.reason());
-    Diagnostic::error(msg).in_file(file_name).at(line)
+    let (msg, hint) = reason_to_japanese(e.reason());
+    let mut d = Diagnostic::error(msg).in_file(file_name);
+    d = match original_col(pos, &pre.src, orig_src, line) {
+        Some(col) => d.at_col(line, col),
+        None => d.at(line),
+    };
+    if let Some(h) = hint {
+        d = d.with_hint(h);
+    }
+    d
 }
-    
-    fn reason_to_japanese(reason: &chumsky::error::RichReason<char>) -> String {
+
+/// preprocess後のバイトオフセットを、元ソースの桁（1-indexed、文字単位）に直す。
+/// line_mapは行しか対応していないので、preprocess後の行と元ソースの行を先頭から比べ、
+/// 一致している範囲（＝セリフ結合などで書き換わっていない部分）を指すときだけ桁を返す。
+/// 結合で後ろに足された部分を指すときはNone。
+fn original_col(pos: usize, pre_src: &str, orig_src: &str, orig_line: u32) -> Option<u32> {
+    let line_start = pre_src[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col_chars = pre_src[line_start..pos].chars().count();
+    let out_line = pre_src[line_start..].split('\n').next().unwrap_or("");
+    let orig = orig_src.lines().nth((orig_line as usize).checked_sub(1)?)?;
+    let same = out_line.chars().zip(orig.chars()).take_while(|(a, b)| a == b).count();
+    if col_chars < same {
+        Some(col_chars as u32 + 1)
+    } else {
+        None
+    }
+}
+
+/// 見つかったトークンを表示用にする。改行はErrorDescriptionを壊すので文字にしない。
+fn describe_found(found: Option<&char>) -> String {
+    match found {
+        None => "ファイル末尾".to_string(),
+        Some('\n') | Some('\r') => "行末".to_string(),
+        Some('\t') => "タブ".to_string(),
+        Some(c) => format!("「{}」", c),
+    }
+}
+
+/// エラー理由を日本語のメッセージとヒントにする。
+fn reason_to_japanese(reason: &chumsky::error::RichReason<char>) -> (String, Option<String>) {
     use chumsky::error::{RichReason, RichPattern};
 
     match reason {
         // .labelled("日本語") の出力はここに入る → そのまま日本語で出力
-        RichReason::Custom(s) => s.to_string(),
+        RichReason::Custom(s) => (s.to_string(), None),
 
         RichReason::ExpectedFound { expected, found } => {
-            let found_str = match found {
-                None => "ファイル末尾".to_string(),
-                Some(f) => {
-                    let d = format!("{:?}", f);
-                    extract_char_from_debug(&d)
-                        .map(|c| format!("「{}」", c))
-                        .unwrap_or_else(|| "不明な文字".to_string())
+            let found_str = describe_found(found.as_deref());
+
+            // .labelled("日本語") は RichPattern::Label に入る → 優先して使う。
+            // 同じ位置で複数の書き方が候補になると複数並ぶので、重複を除いて
+            // 最初のものを本文に、残りをヒントに回す。
+            let mut labels: Vec<&str> = Vec::new();
+            for p in expected {
+                if let RichPattern::Label(s) = p {
+                    if !labels.contains(&s.as_ref()) {
+                        labels.push(s.as_ref());
+                    }
                 }
-            };
-
-            let exp_count = expected.len();
-            if exp_count == 0 {
-                return format!("予期しない{}があります", found_str);
             }
-
-            // .labelled("日本語") は RichPattern::Label に入る → 優先して使う
-            let labels: Vec<String> = expected.iter()
-                .filter_map(|p| match p {
-                    RichPattern::Label(s) => Some((*s).to_string()),
-                    _ => None,
-                })
-                .collect();
-
-            if !labels.is_empty() {
-                return format!("{}（{}付近）", labels[0], found_str);
+            if let Some((first, rest)) = labels.split_first() {
+                let msg = format!("{}（{}付近）", first, found_str);
+                let hint = if rest.is_empty() {
+                    None
+                } else {
+                    Some(format!("次の可能性もあります: {}", rest.join("／")))
+                };
+                return (msg, hint);
             }
 
             // ラベルなし：トークン一覧を展開
             let tokens: Vec<String> = expected.iter()
                 .filter_map(|p| match p {
-                    RichPattern::Token(t) => Some(format!("「{:?}」", t)),
+                    RichPattern::Token(t) => Some(describe_found(Some(&**t))),
+                    RichPattern::Identifier(s) => Some(format!("「{}」", s)),
                     RichPattern::EndOfInput => Some("ファイル末尾".to_string()),
                     _ => None,
                 })
                 .collect();
 
-            if exp_count <= 3 {
+            // 具体的なトークンが無い（SomethingElse/Anyのみ等）ときは
+            // 「〜が必要なところに」の主語が空になるので、予期しないものとだけ伝える。
+            let msg = if tokens.is_empty() {
+                format!("予期しない{}があります", found_str)
+            } else if tokens.len() <= 3 {
                 format!("{}が必要なところに{}があります", tokens.join("または"), found_str)
             } else {
                 format!("{}付近に記述ミスがあります", found_str)
-            }
+            };
+            (msg, None)
         }
-    }
-}
-
-    
-   fn extract_char_from_debug(s: &str) -> Option<char> {
-    let start = s.find('\'')?;
-    let rest = &s[start + 1..];
-    if rest.starts_with('\\') {
-        match rest.chars().nth(1)? {
-            'n'  => Some('\n'),
-            't'  => Some('\t'),
-            '\\' => Some('\\'),
-            '\'' => Some('\''),
-            'r'  => Some('\r'),
-            c    => Some(c),
-        }
-    } else {
-        rest.chars().next()
     }
 }
 
@@ -1903,7 +1923,7 @@ fn test_rich_to_japanese_resolves_line_after_dialogue_merge() {
         .parse(&*pre.src)
         .into_result()
         .expect_err("「let x」は「=値」を欠いており構文エラーになるはず");
-    let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, "main.mnt"));
+    let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, &src, "main.mnt"));
     assert!(
         msg.contains("4行目"),
         "preprocess後にズレた行番号ではなく元ソースの4行目が報告されるべき: {}",
@@ -1940,7 +1960,7 @@ fn unrecognized_stmt_message(line: &str) -> String {
         .parse(&*pre.src)
         .into_result()
         .expect_err("不明な行は構文エラーになるはず");
-    let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, "main.mnt"));
+    let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, &src, "main.mnt"));
     assert!(msg.contains("認識できない文です"), "{}", msg);
     msg
 }
@@ -2015,3 +2035,87 @@ OnClose => {
 }
 
 
+#[test]
+fn test_reason_found_uses_char_directly() {
+    use chumsky::error::{RichReason, RichPattern};
+    use chumsky::util::MaybeRef;
+    let r: RichReason<char> = RichReason::ExpectedFound {
+        expected: vec![RichPattern::Token(MaybeRef::Val('='))],
+        found: Some(MaybeRef::Val('\'')),
+    };
+    assert_eq!(reason_to_japanese(&r).0, "「=」が必要なところに「'」があります");
+    let r: RichReason<char> = RichReason::ExpectedFound {
+        expected: vec![RichPattern::Token(MaybeRef::Val(')'))],
+        found: Some(MaybeRef::Val('\n')),
+    };
+    assert_eq!(reason_to_japanese(&r).0, "「)」が必要なところに行末があります");
+}
+
+#[test]
+fn test_reason_something_else_only_has_subject() {
+    use chumsky::error::{RichReason, RichPattern};
+    let r: RichReason<char> = RichReason::ExpectedFound {
+        expected: vec![RichPattern::SomethingElse],
+        found: None,
+    };
+    assert_eq!(reason_to_japanese(&r).0, "予期しないファイル末尾があります");
+}
+
+#[test]
+fn test_reason_multiple_labels_go_to_hint() {
+    use chumsky::error::{RichReason, RichPattern};
+    use std::borrow::Cow;
+    let r: RichReason<char> = RichReason::ExpectedFound {
+        expected: vec![
+            RichPattern::Label(Cow::Borrowed("Aしてください")),
+            RichPattern::Label(Cow::Borrowed("Bしてください")),
+            RichPattern::Label(Cow::Borrowed("Aしてください")),
+        ],
+        found: None,
+    };
+    let (msg, hint) = reason_to_japanese(&r);
+    assert_eq!(msg, "Aしてください（ファイル末尾付近）");
+    assert_eq!(hint.as_deref(), Some("次の可能性もあります: Bしてください"));
+}
+
+#[test]
+fn test_original_col_on_plain_line() {
+    let orig = "OnBoot => {\n    let x\n}";
+    let pre = preprocess(orig).expect("preprocess failed");
+    let pos = pre.src.find("let").unwrap();
+    assert_eq!(original_col(pos, &pre.src, orig, 2), Some(5));
+}
+
+#[test]
+fn test_original_col_counts_chars_not_bytes() {
+    let orig = "OnBoot => {\n    湊さん = 1\n}";
+    let pre = preprocess(orig).expect("preprocess failed");
+    let pos = pre.src.find(" = ").unwrap() + 1;
+    assert_eq!(original_col(pos, &pre.src, orig, 2), Some(9));
+}
+
+#[test]
+fn test_original_col_none_inside_joined_part() {
+    // 「ふが」は2行目のセリフに結合されるので、結合部分を指す桁は元ソースと一致しない
+    let orig = "OnBoot => {\n    湊: ほげ\n    ふが\n}";
+    let pre = preprocess(orig).expect("preprocess failed");
+    let pos = pre.src.find("ふが").unwrap();
+    assert_eq!(pre.resolve_line(line_at_offset(pos as u32, &pre.src)), 2);
+    assert_eq!(original_col(pos, &pre.src, orig, 2), None);
+    // 結合前の部分は桁が取れる
+    let pos = pre.src.find("ほげ").unwrap();
+    assert_eq!(original_col(pos, &pre.src, orig, 2), Some(8));
+}
+
+#[test]
+fn test_parse_error_diagnostic_has_col() {
+    let orig = "OnBoot => {\n    let x\n}\n";
+    let pre = preprocess(orig).expect("preprocess failed");
+    let errors = program_with_include()
+        .parse(&*pre.src)
+        .into_result()
+        .expect_err("構文エラーになるはず");
+    let d = rich_to_diagnostic(&errors[0], &pre, orig, "main.mnt");
+    assert_eq!(d.line(), Some(2));
+    assert_eq!(d.col(), Some(5), "{:?}", d);
+}
