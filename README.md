@@ -33,15 +33,20 @@ SSP（伺か本体）に読み込ませなくても、talksスクリプトの構
 静的解析結果（未定義call、ループ外break等）を手元で確認できるCLIツールです。
 
 ```
-cargo build --release --bin minato_check
-target\i686-pc-windows-msvc\release\minato_check.exe "ゴーストのホームディレクトリ"
+cargo build --release --features cli --bin minato_check
+target\i686-pc-windows-msvc\release\minato_check.exe "ghost/masterのディレクトリ"
 ```
+
+`talks/main.mnt` を含むディレクトリ（ゴーストの `ghost/master`）を指定します。
+`--features cli` はminato_check専用の依存（ariadne）を有効にするためのもので、本体DLLのビルドには不要です。
+結合テストも含めて実行するときは `cargo test --features cli` を使います。
+色付き表示を止めるには `--no-color` を付けます。
 
 （ターゲットtripleは環境に合わせて読み替えてください）
 
 `target\...\release\minato_check.exe` と `tools\minato_check.bat` を同じ
 フォルダにコピーして配布すれば、Rust環境がない人でも `minato_check.bat` に
-ゴーストのホームディレクトリ（`talks`フォルダを含む場所）をドラッグ&ドロップ
+ゴーストの `ghost/master`（`talks`フォルダを含む場所）をドラッグ&ドロップ
 するだけで使えます。
 
 - 終了コード `0`: 構文エラーなし（warning/noticeのみ、または問題なし）
