@@ -28,7 +28,7 @@ use parser::{load_program, Talk, LoadError, Stmt, Spanned};
 use winapi::um::winbase::{GlobalAlloc, GlobalFree, GMEM_FIXED};
 use winapi::shared::minwindef::HGLOBAL;
 use crate::analyzer::Analyzer;
-use crate::diagnostic::{Diagnostic, Level, render_legacy};
+use crate::diagnostic::{Diagnostic, Level, render_legacy, render_header, render_balloon_list, sort_diagnostics};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -51,7 +51,8 @@ struct ManatoState {
     ghost_dir: PathBuf,
     next_talk_time: Instant,
     virtual_time: Option<(i32, u32, u32, u32, u32, u32)>,
-    parse_error: Option<String>,
+    /// ロードを止めた診断（構文エラー・preprocessエラー・静的解析のerror）。並び替え済み。
+    parse_error: Option<Vec<Diagnostic>>,
     /// 台本のロードに失敗した状態か。parse_errorはOnBootで一度だけ返すため
     /// takeされて消えるが、こちらは消えない。save.jsonの上書きガードに使う。
     /// この状態のcodegenはglobalsを読み込んでいないので、保存すると
@@ -359,8 +360,7 @@ let (all_talks, all_funcs, all_globals) = match load_program_guarded(&main) {
     Ok(result) => result,
 
     Err(LoadError::PreprocessError(d)) => {
-        // preprocessエラーはそのままメッセージを使う
-        let msg = render_legacy(&d);
+        let msg = vec![d];
         let state = ManatoState {
             codegen: Codegen::new(config.characters.clone(), HashMap::new(),dir.to_path_buf()) ,
             talks: HashMap::new(),
@@ -379,7 +379,8 @@ let (all_talks, all_funcs, all_globals) = match load_program_guarded(&main) {
         return Ok(state);
     }
 Err(LoadError::ParseError(diags, _err_path)) => {
-    let msg = diags.iter().map(render_legacy).collect::<Vec<_>>().join("\\n");
+    let mut msg = diags;
+    sort_diagnostics(&mut msg);
 
     let state = ManatoState {
         codegen: Codegen::new(config.characters.clone(), HashMap::new(), dir.to_path_buf()),
@@ -420,15 +421,14 @@ let talk_names: HashSet<String> = talks.keys().cloned().collect();
 let analyze_errors = Analyzer::new(talk_names, func_names)
     .analyze(&talks, &all_funcs);
 
-let error_only: Vec<_> = analyze_errors.iter()
+let mut error_only: Vec<Diagnostic> = analyze_errors.iter()
     .filter(|e| e.level == Level::Error)
+    .cloned()
     .collect();
 
 if !error_only.is_empty() {
-    let msg = error_only.iter()
-        .map(|e| render_legacy(e))
-        .collect::<Vec<_>>()
-        .join("\\n");
+    sort_diagnostics(&mut error_only);
+    let msg = error_only;
     // ... return Ok(state) でブロック
 
     let state = ManatoState {
@@ -455,7 +455,7 @@ if !error_only.is_empty() {
 // ★追加: 静的チェックのwarningは最初のイベント応答で一度だけ返す
 let analyze_warnings: Vec<(String, String)> = analyze_errors.iter()
     .filter(|e| e.level == Level::Warning)
-    .map(|e| (e.level.as_str().to_string(), render_legacy(e)))
+    .map(|e| (e.level.as_str().to_string(), render_header(e)))
     .collect();
 
 if let Some(_v) = talks.get("OnMouseDoubleClick") {
@@ -612,11 +612,12 @@ fn handle_request(req: &str) -> String {
     };
 if state.parse_error.is_some() {
     if event == "OnBoot" {
-        let msg = state.parse_error.take().unwrap();
+        let diags = state.parse_error.take().unwrap();
         let mut errors = std::mem::take(&mut state.init_errors);
-        errors.push(("error".to_string(), msg.clone()));
+        // ErrorDescriptionには全件を載せる（バルーン本文は先頭数件に打ち切る）
+        errors.extend(diags.iter().map(|d| (d.level.as_str().to_string(), render_header(d))));
         return shiori_response_with_error(
-            &format!("\\b[2]\\0パースエラー:\\n{}\\e", msg),
+            &format!("\\b[2]\\0パースエラー:\\n{}\\e", render_balloon_list(&diags)),
             &errors
         );
     }
@@ -1847,8 +1848,7 @@ fn test_panic_bak_notice_delivered_even_on_parse_error() {
 }
 
 
-// ── Diagnostic導入後もDLL側の文字列形式が従来どおりであることの確認 ──
-// （変化はファイル名が付くことのみ）
+// ── バルーン本文・ErrorDescriptionの出力形式の確認 ──
 #[cfg(test)]
 fn init_with_main(main: &str, extra: &[(&str, &str)]) -> ManatoState {
     let dir = tempfile::tempdir().expect("tempdir作成失敗");
@@ -1867,42 +1867,85 @@ fn init_with_main(main: &str, extra: &[(&str, &str)]) -> ManatoState {
 }
 
 
-#[test]
-fn test_legacy_format_preprocess_error_has_file_name() {
-    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let state = init_with_main("OnBoot => {\n    let x =\n}\n", &[]);
-    assert_eq!(
-        state.parse_error.as_deref(),
-        Some("main.mntの2行目: 代入する値がありません。「let x =」の後に値を書いてください。")
-    );
+/// initした状態でOnBootを送り、(バルーン本文, ErrorDescription) を返す。
+#[cfg(test)]
+fn boot_error_parts(state: ManatoState) -> (String, String) {
+    if let Ok(mut s) = STATE.lock() { *s = Some(state); }
+    let req = "SEND SHIORI/3.0\r\nID: OnBoot\r\nSender: SSP\r\nCharset: UTF-8\r\n\r\n";
+    let res = handle_request(req);
+    if let Ok(mut s) = STATE.lock() { *s = None; }
+    let header = |name: &str| res.lines()
+        .find_map(|l| l.strip_prefix(name))
+        .unwrap_or_else(|| panic!("{}が無い: {}", name, res))
+        .to_string();
+    (header("Value: "), header("ErrorDescription: "))
 }
 
 #[test]
-fn test_legacy_format_preprocess_error_in_included_file() {
+fn test_balloon_preprocess_error_has_file_name() {
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let state = init_with_main("OnBoot => {\n    let x =\n}\n", &[]);
+    let (body, desc) = boot_error_parts(state);
+    let expected = "main.mntの2行目: 代入する値がありません。「let x =」の後に値を書いてください。";
+    assert_eq!(body, format!("\\b[2]\\0パースエラー:\\n{}\\e", expected));
+    assert_eq!(desc, expected);
+}
+
+#[test]
+fn test_balloon_preprocess_error_in_included_file() {
     let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let state = init_with_main(
         "include \"sub.mnt\"\nOnBoot => {\n    湊: おはよう\n}\n",
         &[("sub.mnt", "OnClose => {\n    let y =\n}\n")],
     );
-    let msg = state.parse_error.expect("エラーになるはず");
-    assert!(msg.starts_with("sub.mntの2行目: "), "include先のファイル名が付いていない: {}", msg);
+    let (body, _) = boot_error_parts(state);
+    assert!(body.contains("\\nsub.mntの2行目: "), "include先のファイル名が付いていない: {}", body);
 }
 
 #[test]
-fn test_legacy_format_analyze_error() {
+fn test_balloon_unclosed_brace_shows_hint_on_next_line() {
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let state = init_with_main("OnBoot => {\n    湊: おはよう\n", &[]);
+    let (body, desc) = boot_error_parts(state);
+    assert_eq!(
+        body,
+        "\\b[2]\\0パースエラー:\\nmain.mntの1行目: 1行目の「{」が閉じられていません\\nヒント: 対応する「}」を書いてください\\e"
+    );
+    assert_eq!(desc, "main.mntの1行目: 1行目の「{」が閉じられていません ヒント: 対応する「}」を書いてください");
+}
+
+#[test]
+fn test_balloon_analyze_error_shows_context() {
     let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let state = init_with_main("OnBoot => {\n    break\n}\n", &[]);
-    assert_eq!(
-        state.parse_error.as_deref(),
-        Some("OnBoot内 main.mntの2行目: ループの外で break を使っています")
-    );
+    let (body, desc) = boot_error_parts(state);
+    assert_eq!(body, "\\b[2]\\0パースエラー:\\nmain.mntの2行目（OnBoot内）: ループの外で break を使っています\\e");
+    assert_eq!(desc, "main.mntの2行目（OnBoot内）: ループの外で break を使っています");
 }
 
 #[test]
-fn test_legacy_format_parse_error() {
+fn test_balloon_truncates_but_error_description_has_all() {
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    // ループ外breakを5件。イベント名順ではなく行番号順に並ぶこと
+    let state = init_with_main(
+        "ZZZ => {\n    break\n}\nAAA => {\n    break\n}\nMMM => {\n    break\n}\nBBB => {\n    break\n}\nCCC => {\n    break\n}\n",
+        &[],
+    );
+    let (body, desc) = boot_error_parts(state);
+    let lines: Vec<&str> = body.split("\\n").collect();
+    assert_eq!(lines.len(), 5, "見出し＋3件＋他n件になるべき: {}", body);
+    assert!(lines[1].starts_with("main.mntの2行目（ZZZ内）"), "{}", body);
+    assert!(lines[2].starts_with("main.mntの5行目（AAA内）"), "{}", body);
+    assert!(lines[3].starts_with("main.mntの8行目（MMM内）"), "{}", body);
+    assert_eq!(lines[4], "他2件（minato_check で全件を確認できます）\\e");
+    assert_eq!(desc.split('\x01').count(), 5, "ErrorDescriptionには全件載るべき: {}", desc);
+}
+
+#[test]
+fn test_balloon_parse_error_is_single_line_header() {
     let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let state = init_with_main("OnBoot => {\n    let x\n}\n", &[]);
-    let msg = state.parse_error.expect("エラーになるはず");
-    assert!(msg.starts_with("main.mntの2行目: "), "{}", msg);
-    assert!(!msg.contains('\n'), "改行を含んでいる: {:?}", msg);
+    let (body, desc) = boot_error_parts(state);
+    assert!(body.contains("\\nmain.mntの2行目: "), "{}", body);
+    assert!(desc.starts_with("main.mntの2行目: "), "{}", desc);
 }

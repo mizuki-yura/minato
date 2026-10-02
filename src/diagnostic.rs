@@ -130,9 +130,149 @@ pub fn render_legacy(d: &Diagnostic) -> String {
     s.replace(['\r', '\n'], " ")
 }
 
+/// 位置の表示。「main.mntの4行目（OnBoot内）」のような形。位置もコンテキストも無ければ None。
+pub fn location(d: &Diagnostic) -> Option<String> {
+    let base = match (&d.file, d.line) {
+        (Some(f), Some(l)) => Some(format!("{}の{}行目", f, l)),
+        (None, Some(l)) => Some(format!("{}行目", l)),
+        (Some(f), None) => Some(f.clone()),
+        (None, None) => None,
+    };
+    match (base, &d.context) {
+        (Some(b), Some(c)) => Some(format!("{}（{}内）", b, c)),
+        (Some(b), None) => Some(b),
+        (None, Some(c)) => Some(format!("{}内", c)),
+        (None, None) => None,
+    }
+}
+
+/// ErrorDescriptionヘッダ向け。改行を含まない1行を返す。
+/// 例: 「main.mntの4行目（OnBoot内）: メッセージ ヒント: …」
+pub fn render_header(d: &Diagnostic) -> String {
+    let mut s = match location(d) {
+        Some(loc) => format!("{}: {}", loc, d.message),
+        None => d.message.clone(),
+    };
+    if let Some(h) = &d.hint {
+        s.push_str(" ヒント: ");
+        s.push_str(h);
+    }
+    // 1行ヘッダなので改行と、件数区切りの\x01を潰す
+    s.replace(['\r', '\n', '\x01'], " ")
+}
+
+/// さくらスクリプトとして解釈されないよう、本文中の「\」をエスケープする。
+fn escape_sakura(s: &str) -> String {
+    s.replace(['\r', '\n'], " ").replace('\\', "\\\\")
+}
+
+/// バルーン本文向け（さくらスクリプト）。
+/// プロポーショナルフォントで読まれるため桁揃えや下線には頼らず、
+/// 位置とメッセージを1行、ヒントがあれば次の行に置く。
+pub fn render_balloon(d: &Diagnostic) -> String {
+    let mut s = match location(d) {
+        Some(loc) => format!("{}: {}", escape_sakura(&loc), escape_sakura(&d.message)),
+        None => escape_sakura(&d.message),
+    };
+    if let Some(h) = &d.hint {
+        s.push_str("\\n");
+        s.push_str("ヒント: ");
+        s.push_str(&escape_sakura(h));
+    }
+    s
+}
+
+/// バルーン本文に出す最大件数。残りは「他n件」とまとめる。
+pub const BALLOON_MAX_ITEMS: usize = 3;
+
+/// ファイル名・行番号の順に並べる。位置の無いものは後ろ。順序の同じものは元の順を保つ。
+pub fn sort_diagnostics(diags: &mut [Diagnostic]) {
+    diags.sort_by(|a, b| {
+        let key = |d: &Diagnostic| (d.file.is_none(), d.file.clone(), d.line.is_none(), d.line, d.col);
+        key(a).cmp(&key(b))
+    });
+}
+
+/// 複数件をバルーン本文にまとめる。先頭BALLOON_MAX_ITEMS件だけ表示し、
+/// 残りは件数と全件の確認先を示す。並び替え済みの列を渡すこと。
+pub fn render_balloon_list(diags: &[Diagnostic]) -> String {
+    let mut parts: Vec<String> = diags.iter().take(BALLOON_MAX_ITEMS).map(render_balloon).collect();
+    if diags.len() > BALLOON_MAX_ITEMS {
+        parts.push(format!(
+            "他{}件（minato_check で全件を確認できます）",
+            diags.len() - BALLOON_MAX_ITEMS
+        ));
+    }
+    parts.join("\\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_format() {
+        let d = Diagnostic::error("ループの外で break を使っています")
+            .in_file("main.mnt").at(2).with_context("OnBoot")
+            .with_hint("for/whileの中で使ってください");
+        assert_eq!(
+            render_header(&d),
+            "main.mntの2行目（OnBoot内）: ループの外で break を使っています ヒント: for/whileの中で使ってください"
+        );
+        assert!(!render_header(&Diagnostic::error("a\nb\x01c")).contains(['\n', '\x01']));
+    }
+
+    #[test]
+    fn balloon_format_with_hint() {
+        let d = Diagnostic::error("1行目の「{」が閉じられていません")
+            .in_file("main.mnt").at(1).with_hint("対応する「}」を書いてください");
+        assert_eq!(
+            render_balloon(&d),
+            "main.mntの1行目: 1行目の「{」が閉じられていません\\nヒント: 対応する「}」を書いてください"
+        );
+    }
+
+    #[test]
+    fn balloon_escapes_backslash() {
+        let d = Diagnostic::error("認識できない文です: 「\\0あ」").in_file("main.mnt").at(3);
+        assert_eq!(render_balloon(&d), "main.mntの3行目: 認識できない文です: 「\\\\0あ」");
+    }
+
+    #[test]
+    fn balloon_list_truncates_with_destination() {
+        let diags: Vec<Diagnostic> = (1..=5)
+            .map(|i| Diagnostic::error(format!("e{}", i)).in_file("main.mnt").at(i))
+            .collect();
+        let s = render_balloon_list(&diags);
+        assert!(s.contains("e1") && s.contains("e3") && !s.contains("e4"), "{}", s);
+        assert!(s.ends_with("\\n他2件（minato_check で全件を確認できます）"), "{}", s);
+        assert!(!render_balloon_list(&diags[..3]).contains("他"));
+    }
+
+    #[test]
+    fn sort_by_file_then_line() {
+        let mut diags = vec![
+            Diagnostic::error("c").in_file("sub.mnt").at(1),
+            Diagnostic::error("nofile"),
+            Diagnostic::error("b").in_file("main.mnt").at(9),
+            Diagnostic::error("a").in_file("main.mnt").at(2),
+        ];
+        sort_diagnostics(&mut diags);
+        let order: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(order, ["a", "b", "c", "nofile"]);
+    }
+
+    #[test]
+    fn rendered_text_is_shift_jis_encodable() {
+        let d = Diagnostic::error("1行目の「{」が閉じられていません")
+            .in_file("main.mnt").at(1).with_context("OnBoot")
+            .with_hint("次の可能性もあります: A／B");
+        let many = vec![d.clone(); 5];
+        for s in [render_header(&d), render_balloon_list(&many)] {
+            let (_, _, had_errors) = encoding_rs::SHIFT_JIS.encode(&s);
+            assert!(!had_errors, "Shift_JISに無い文字を含む: {}", s);
+        }
+    }
 
     #[test]
     fn legacy_parse_error_format() {
