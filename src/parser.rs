@@ -1009,7 +1009,10 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
     let mut line_map: Vec<u32> = Vec::new();
     let mut buf: Option<(String, u32)> = None;
     let mut prev_chara: Option<String> = None;
-    let mut brace_stack: Vec<BraceKind> = Vec::new();   // ★ brace_depth → brace_stack
+    // 開いた「{」の種類と行番号。閉じ忘れを開いた行で報告するために行も積む。
+    let mut brace_stack: Vec<(BraceKind, u32)> = Vec::new();
+    // 行頭から始まる「/* … */」コメントの中か。中の「{」を数えないために使う。
+    let mut in_block_comment = false;
     let mut nesting_depth: u32 = 0;
 
     for (line_idx, line) in src.lines().enumerate() {
@@ -1029,7 +1032,7 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
             )).at(line_num));
         }
 // is_in_map は「この行が始まる前のスタック状態」で決める。
-        let is_in_map = matches!(brace_stack.last(), Some(BraceKind::Map));
+        let is_in_map = matches!(brace_stack.last(), Some((BraceKind::Map, _)));
 
         let kind = if trimmed == ";" {
             LineKind::Separator
@@ -1069,12 +1072,17 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
         // 「湊: 括弧「{」の話」の一行でbrace_stackが壊れ、
         // 以降 is_in_map が真に張り付いてセリフ結合が効かなくなる。
         // さらに талの閉じ「}」がMapを剥がすため、ズレが後続へ残る。
-        if matches!(kind, LineKind::Code | LineKind::Bare) {
+        // コメント内の「{」も同様に数えない（閉じ忘れの誤検出を防ぐ）。
+        let comment_line = in_block_comment || trimmed.starts_with("/*");
+        if comment_line {
+            in_block_comment = !trimmed.contains("*/");
+        }
+        if !comment_line && matches!(kind, LineKind::Code | LineKind::Bare) {
             let events = scan_braces(trimmed, &mut nesting_depth)
                 .map_err(|e| Diagnostic::error(e).at(line_num))?;
             for ev in events {
                 match ev {
-                    BraceEvent::Open(k) => brace_stack.push(k),
+                    BraceEvent::Open(k) => brace_stack.push((k, line_num)),
                     BraceEvent::Close => { brace_stack.pop(); }
                 }
             }
@@ -1138,6 +1146,13 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
         out.push_str(&b);
         out.push('\n');
         line_map.push(start_line);
+    }
+    // 閉じ忘れはファイル末尾ではなく、開いた行で報告する。
+    // 残ったうち最も内側（最後に開いたもの）が閉じ忘れの可能性が高い。
+    if let Some(&(_, open_line)) = brace_stack.last() {
+        return Err(Diagnostic::error(format!("{}行目の「{{」が閉じられていません", open_line))
+            .at(open_line)
+            .with_hint("対応する「}」を書いてください"));
     }
     Ok(PreprocessResult { src: out, line_map })
 }
@@ -1943,4 +1958,60 @@ fn test_unknown_line_with_symbols_has_no_hint() {
     assert!(!msg.contains("hoge()"), "{}", msg);
     assert!(!msg.contains("call"), "{}", msg);
 }
+
+#[test]
+fn test_unclosed_brace_reported_at_open_line() {
+    let src = "OnBoot => {
+    湊: おはよう
+";
+    let d = preprocess(src).err().expect("閉じ忘れはエラーになるべき");
+    assert_eq!(d.line(), Some(1));
+    assert!(d.message.contains("1行目の「{」が閉じられていません"), "{:?}", d);
+}
+
+#[test]
+fn test_unclosed_brace_in_nested_block_reports_inner_line() {
+    // ifの「}」を忘れても、トークの「}」がifを閉じてしまうので外側が残る
+    let src = "OnBoot => {
+    if (1) {
+        湊: a
+    }
+    while (1) {
+        湊: b
+}
+";
+    let d = preprocess(src).err().expect("閉じ忘れはエラーになるべき");
+    assert_eq!(d.line(), Some(1), "{:?}", d);
+
+    // 内側が2つ残る場合は最も内側を報告する
+    let src = "OnBoot => {
+    if (1) {
+        湊: a
+";
+    let d = preprocess(src).err().expect("閉じ忘れはエラーになるべき");
+    assert_eq!(d.line(), Some(2), "{:?}", d);
+}
+
+#[test]
+fn test_balanced_file_has_no_unclosed_error() {
+    let src = "OnBoot => {
+    let m = {
+        a: 1
+    }
+    if (1) {
+        湊: 括弧「{」の話
+    } else {
+        湊: 「${m.a}」
+    }
+}
+// {
+/* {
+   { */
+OnClose => {
+    湊: さようなら
+}
+";
+    assert!(preprocess(src).is_ok(), "{:?}", preprocess(src).err());
+}
+
 
