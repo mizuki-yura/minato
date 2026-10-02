@@ -3,20 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use crate::parser::{Stmt, Expr, Talk, Spanned};
 use crate::codegen::is_builtin;
-#[derive(Debug)]
-pub struct AnalyzeError {
-      pub level:String,
-    pub event: String,
-    pub message: String,
-    pub line: u32,
-}
+use crate::diagnostic::{Diagnostic, Level};
 
 pub struct Analyzer<'a> {
     /// 定義済みtalk名
     talk_names: HashSet<String>,
     /// 定義済みfunc名（トップレベル＋現在の検査対象内でローカル定義されたもの）
     func_names: HashSet<String>,
-    errors: Vec<AnalyzeError>,
+    errors: Vec<Diagnostic>,
     loop_depth: usize,
     current_context: &'a str,
 }
@@ -39,7 +33,7 @@ pub fn analyze(
     mut self,
     talks: &'a HashMap<String, Vec<Talk>>,
     funcs: &'a [(String, Vec<String>, Vec<Spanned<Stmt>>)],
-) -> Vec<AnalyzeError> {
+) -> Vec<Diagnostic> {
     // talkを検査
     // HashMapの走査順は非決定的（実行のたびに変わりうる）なため、
     // エラーメッセージの並びを安定させるためイベント名でソートしてから走査する。
@@ -70,6 +64,15 @@ pub fn analyze(
     self.errors
 }
 
+    fn push(&mut self, level: Level, spanned: &Spanned<Stmt>, message: impl Into<String>) {
+        self.errors.push(
+            Diagnostic::new(level, message)
+                .in_file(&*spanned.file)
+                .at(spanned.line)
+                .with_context(self.current_context),
+        );
+    }
+
     fn check_stmts(&mut self, stmts: &[Spanned<Stmt>]) {
         for spanned in stmts {
             self.check_stmt(spanned);
@@ -77,27 +80,16 @@ pub fn analyze(
     }
 
     fn check_stmt(&mut self, spanned: &Spanned<Stmt>) {
-        let line = spanned.line;
         let stmt = &spanned.node;
         match stmt {
             Stmt::Break => {
                 if self.loop_depth == 0 {
-                    self.errors.push(AnalyzeError {
-                         level: "error".to_string(),
-                        event: self.current_context.to_string(),
-                        message: "ループの外で break を使っています".to_string(),
-                        line,
-                    });
+                    self.push(Level::Error, spanned, "ループの外で break を使っています".to_string());
                 }
             }
             Stmt::Continue => {
                 if self.loop_depth == 0 {
-                    self.errors.push(AnalyzeError {
-                        level: "error".to_string(),
-                        event: self.current_context.to_string(),
-                        message: "ループの外で continue を使っています".to_string(),
-                        line,
-                    });
+                    self.push(Level::Error, spanned, "ループの外で continue を使っています".to_string());
                 }
             }
            Stmt::Return(_) => {
@@ -109,15 +101,10 @@ Stmt::Call(expr) => {
         Expr::Var(path) if path.len() == 1 => {
             let name = &path[0];
             if !self.talk_names.contains(name) && !self.func_names.contains(name) {
-                self.errors.push(AnalyzeError {
-                    level: "notice".to_string(),
-                    event: self.current_context.to_string(),
-                    message: format!(
+                self.push(Level::Notice, spanned, format!(
                         "\"{}\" は未定義です（動的callなら無視してください）",
                         name
-                    ),
-                    line,
-                });
+                    ));
             }
         }
         Expr::Var(path) if path.len() >= 2 => {
@@ -129,15 +116,10 @@ Stmt::Call(expr) => {
             if !self.talk_names.contains(&joined) {
                 let prefix = format!("{}.", path[0]);
                 if self.talk_names.iter().any(|n| n.starts_with(&prefix)) {
-                    self.errors.push(AnalyzeError {
-                        level: "notice".to_string(),
-                        event: self.current_context.to_string(),
-                        message: format!(
+                    self.push(Level::Notice, spanned, format!(
                             "\"{}\" は未定義です（同じ「{}」で始まるトークはありますが、この名前はありません）",
                             joined, prefix
-                        ),
-                        line,
-                    });
+                        ));
                 }
             }
         }
@@ -146,15 +128,10 @@ Stmt::Call(expr) => {
                 && !self.talk_names.contains(name)
                 && !self.func_names.contains(name)
             {
-                self.errors.push(AnalyzeError {
-                    level: "notice".to_string(),
-                    event: self.current_context.to_string(),
-                    message: format!(
+                self.push(Level::Notice, spanned, format!(
                         "\"{}\" は未定義です（ビルトイン関数でも talk でも func でもありません）",
                         name
-                    ),
-                    line,
-                });
+                    ));
             }
         }
         _ => {}
@@ -309,12 +286,12 @@ mod tests {
         let notice = errors.iter()
             .find(|e| e.message.contains("存在しない関数"))
             .expect("未定義callのnoticeが見つからない");
-        assert_eq!(notice.line, 2, "未定義callの行番号が実際のcall文の行と一致しない: {:?}", errors);
+        assert_eq!(notice.line(), Some(2), "未定義callの行番号が実際のcall文の行と一致しない: {:?}", errors);
     }
 
     #[test]
     fn test_undefined_call_line_number_survives_dialogue_merge() {
-        // トーク定義内に複数行のセリフを挟んでも、未定義callのAnalyzeError.lineが
+        // トーク定義内に複数行のセリフを挟んでも、未定義callの診断のlineが
         // preprocessによる行結合の影響を受けず、元ソースの実際の行番号を指すこと。
         let src = r#"OnBoot => {
     湊: 1行目
@@ -334,7 +311,7 @@ mod tests {
         let notice = errors.iter()
             .find(|e| e.message.contains("存在しない関数") && e.message.contains("未定義"))
             .expect("本来検出すべき未定義callが見逃されている");
-        assert_eq!(notice.line, 4, "「call 存在しない関数」の実際の行(4行目)と一致しない: {:?}", errors);
+        assert_eq!(notice.line(), Some(4), "「call 存在しない関数」の実際の行(4行目)と一致しない: {:?}", errors);
     }
 
     #[test]
@@ -356,12 +333,12 @@ mod tests {
         let error = errors.iter()
             .find(|e| e.message.contains("break"))
             .expect("ループ外breakのエラーが見つからない");
-        assert_eq!(error.line, 3, "breakの行番号が実際のbreak文の行(3行目)と一致しない: {:?}", errors);
+        assert_eq!(error.line(), Some(3), "breakの行番号が実際のbreak文の行(3行目)と一致しない: {:?}", errors);
     }
 
     #[test]
     fn test_continue_outside_loop_line_number_survives_dialogue_merge() {
-        // セリフ行の結合を挟んでも、ループ外continueのAnalyzeError.lineが
+        // セリフ行の結合を挟んでも、ループ外continueの診断のlineが
         // preprocessによる行結合の影響を受けず、元ソースの実際の行番号を指すこと。
         let src = r#"OnBoot => {
     湊: 1行目
@@ -382,7 +359,7 @@ mod tests {
         let error = errors.iter()
             .find(|e| e.message.contains("continue"))
             .expect("ループ外continueのエラーが見つからない");
-        assert_eq!(error.line, 5, "continueの行番号が実際のcontinue文の行(5行目)と一致しない: {:?}", errors);
+        assert_eq!(error.line(), Some(5), "continueの行番号が実際のcontinue文の行(5行目)と一致しない: {:?}", errors);
     }
 
     #[test]
@@ -441,7 +418,7 @@ OnClose => {
             notices_for_target.len(), 1,
             "OnCloseからのcallだけがnoticeになるべき（OnBoot内のcallは誤爆しないが、OnCloseからは見えないはず）: {:?}", errors
         );
-        assert_eq!(notices_for_target[0].event, "OnClose");
+        assert_eq!(notices_for_target[0].context.as_deref(), Some("OnClose"));
     }
 
     #[test]
@@ -498,7 +475,7 @@ OnMmmMiddle => {
 
     let notice_events: Vec<&str> = errors.iter()
         .filter(|e| e.message.contains("未定義"))
-        .map(|e| e.event.as_str())
+        .map(|e| e.context.as_deref().unwrap_or(""))
         .collect();
 
     assert_eq!(
@@ -537,7 +514,7 @@ OnMmmMiddle => {
         let errors = Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs);
         let order: Vec<String> = errors.iter()
             .filter(|e| e.message.contains("未定義"))
-            .map(|e| e.event.clone())
+            .map(|e| e.context.clone().unwrap_or_default())
             .collect();
 
         if let Some(ref prev) = previous {
@@ -547,7 +524,7 @@ OnMmmMiddle => {
     }
 }
 
-    fn analyze_src(src: &str) -> Vec<AnalyzeError> {
+    fn analyze_src(src: &str) -> Vec<Diagnostic> {
         let (talks, funcs) = parse_talks_and_funcs(src);
         let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
         for t in &talks {
@@ -558,8 +535,8 @@ OnMmmMiddle => {
         Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs)
     }
 
-    fn undefined_notices(errors: &[AnalyzeError]) -> Vec<&AnalyzeError> {
-        errors.iter().filter(|e| e.level == "notice" && e.message.contains("未定義")).collect()
+    fn undefined_notices(errors: &[Diagnostic]) -> Vec<&Diagnostic> {
+        errors.iter().filter(|e| e.level == Level::Notice && e.message.contains("未定義")).collect()
     }
 
     #[test]
@@ -569,7 +546,7 @@ OnMmmMiddle => {
         let n = undefined_notices(&errors);
         assert_eq!(n.len(), 1, "{:?}", errors);
         assert!(n[0].message.contains("OnUpdate.OnTypo"));
-        assert_eq!(n[0].line, 6);
+        assert_eq!(n[0].line(), Some(6));
     }
 
     #[test]

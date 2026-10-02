@@ -5,6 +5,7 @@ use chumsky::extra;
 use chumsky::Parser;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use crate::diagnostic::Diagnostic;
 #[cfg(debug_assertions)] use std::io::Write;
 // ── 型定義（変更なし）────────────────────────────────────
 
@@ -1002,7 +1003,8 @@ impl PreprocessResult {
     }
 }
 
-pub fn preprocess(src: &str) -> Result<PreprocessResult, String> {
+/// エラー時のDiagnosticにはファイル名が入らない（呼び出し側のload_programが入れる）。
+pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
     let mut out = String::new();
     let mut line_map: Vec<u32> = Vec::new();
     let mut buf: Option<(String, u32)> = None;
@@ -1021,10 +1023,10 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, String> {
                 out.push('\n');
                 line_map.push(start_line);
             }
-            return Err(format!(
-                "{}行目: 代入する値がありません。「{}」の後に値を書いてください。",
-                line_num, trimmed
-            ));
+            return Err(Diagnostic::error(format!(
+                "代入する値がありません。「{}」の後に値を書いてください。",
+                trimmed
+            )).at(line_num));
         }
 // is_in_map は「この行が始まる前のスタック状態」で決める。
         let is_in_map = matches!(brace_stack.last(), Some(BraceKind::Map));
@@ -1069,7 +1071,7 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, String> {
         // さらに талの閉じ「}」がMapを剥がすため、ズレが後続へ残る。
         if matches!(kind, LineKind::Code | LineKind::Bare) {
             let events = scan_braces(trimmed, &mut nesting_depth)
-                .map_err(|e| format!("{}行目: {}", line_num, e))?;
+                .map_err(|e| Diagnostic::error(e).at(line_num))?;
             for ev in events {
                 match ev {
                     BraceEvent::Open(k) => brace_stack.push(k),
@@ -1269,8 +1271,8 @@ fn extract_chara(s: &str) -> Option<String> {
 
 #[derive(Debug)]
 pub enum LoadError {
-    ParseError(Vec<String>, PathBuf),
-    PreprocessError(String),
+    ParseError(Vec<Diagnostic>, PathBuf),
+    PreprocessError(Diagnostic),
 }
 
 // ── ファイル読み込み ─────────────────────────────────────
@@ -1288,13 +1290,20 @@ pub fn load_program(
     }
     visited.insert(canonical.clone());
 
+    let file_name = entry.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
     let src = std::fs::read_to_string(entry)
-        .map_err(|e| LoadError::PreprocessError(format!("ファイルが読み込めません: {}", e)))?;
+        .map_err(|e| LoadError::PreprocessError(
+            Diagnostic::error(format!("ファイルが読み込めません: {}", e)).in_file(file_name.as_str())
+        ))?;
 
     append_log!("before preprocess");
     let pre = match preprocess(&src) {
         Ok(r) => r,
-        Err(e) => return Err(LoadError::PreprocessError(e)),
+        Err(d) => return Err(LoadError::PreprocessError(d.in_file(file_name.as_str()))),
     };
     let src: &str = &pre.src;
     append_log!("after preprocess");
@@ -1313,19 +1322,14 @@ pub fn load_program(
 }
     append_log!("before parse");
 
-    let file_name = entry.file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-
     let mut items = program_with_include()
         .parse(src)
         .into_result()
         .map_err(|errors| {
-            let msgs: Vec<String> = errors.iter()
-                .map(|e| rich_to_japanese(e, &pre, &file_name))
+            let diags: Vec<Diagnostic> = errors.iter()
+                .map(|e| rich_to_diagnostic(e, &pre, &file_name))
                 .collect();
-            LoadError::ParseError(msgs, entry.to_path_buf())
+            LoadError::ParseError(diags, entry.to_path_buf())
         })?;
     resolve_program_item_lines(&mut items, src, &pre, &file_name);
 
@@ -1355,12 +1359,12 @@ pub fn load_program(
 
 // ── エラーメッセージ日本語化 ──────────────────────────────
 
-fn rich_to_japanese(e: &Rich<char>, pre: &PreprocessResult, file_name: &str) -> String {
+fn rich_to_diagnostic(e: &Rich<char>, pre: &PreprocessResult, file_name: &str) -> Diagnostic {
     let pos = e.span().start as u32;
     let output_line = line_at_offset(pos, &pre.src);
     let line = pre.resolve_line(output_line);
     let msg = reason_to_japanese(e.reason());
-    format!("{}の{}行目: {}", file_name, line, msg)
+    Diagnostic::error(msg).in_file(file_name).at(line)
 }
     
     fn reason_to_japanese(reason: &chumsky::error::RichReason<char>) -> String {
@@ -1884,7 +1888,7 @@ fn test_rich_to_japanese_resolves_line_after_dialogue_merge() {
         .parse(&*pre.src)
         .into_result()
         .expect_err("「let x」は「=値」を欠いており構文エラーになるはず");
-    let msg = rich_to_japanese(&errors[0], &pre, "main.mnt");
+    let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, "main.mnt"));
     assert!(
         msg.contains("4行目"),
         "preprocess後にズレた行番号ではなく元ソースの4行目が報告されるべき: {}",
@@ -1921,7 +1925,7 @@ fn unrecognized_stmt_message(line: &str) -> String {
         .parse(&*pre.src)
         .into_result()
         .expect_err("不明な行は構文エラーになるはず");
-    let msg = rich_to_japanese(&errors[0], &pre, "main.mnt");
+    let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, "main.mnt"));
     assert!(msg.contains("認識できない文です"), "{}", msg);
     msg
 }
@@ -1939,3 +1943,4 @@ fn test_unknown_line_with_symbols_has_no_hint() {
     assert!(!msg.contains("hoge()"), "{}", msg);
     assert!(!msg.contains("call"), "{}", msg);
 }
+

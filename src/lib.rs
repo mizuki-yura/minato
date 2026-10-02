@@ -10,6 +10,7 @@ mod config;
 mod runtime;
 mod saori;
 pub mod analyzer;
+pub mod diagnostic;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_long;
@@ -27,6 +28,7 @@ use parser::{load_program, Talk, LoadError, Stmt, Spanned};
 use winapi::um::winbase::{GlobalAlloc, GlobalFree, GMEM_FIXED};
 use winapi::shared::minwindef::HGLOBAL;
 use crate::analyzer::Analyzer;
+use crate::diagnostic::{Diagnostic, Level, render_legacy};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -283,9 +285,9 @@ fn load_program_guarded(
         Ok(h) => h,
         Err(e) => {
             append_log!(format!("loadu: パーススレッドの起動に失敗しました: {}", e));
-            return Err(LoadError::PreprocessError(
-                "パース処理を開始できませんでした（システムのリソース不足の可能性があります）。少し待ってから再度お試しください。".to_string()
-            ));
+            return Err(LoadError::PreprocessError(Diagnostic::error(
+                "パース処理を開始できませんでした（システムのリソース不足の可能性があります）。少し待ってから再度お試しください。"
+            )));
         }
     };
     let join_result = handle.join();
@@ -294,15 +296,15 @@ fn load_program_guarded(
         Ok(Ok(parse_result)) => parse_result,
         Ok(Err(_panic)) => {
             append_log!("loadu: parser panicked (caught)");
-            Err(LoadError::PreprocessError(
-                "パース中に内部エラーが発生しました。トーク定義の「=>」忘れや、構文の記法を確認してください。".to_string()
-            ))
+            Err(LoadError::PreprocessError(Diagnostic::error(
+                "パース中に内部エラーが発生しました。トーク定義の「=>」忘れや、構文の記法を確認してください。"
+            )))
         }
         Err(_) => {
             append_log!("loadu: parser thread crashed (stack overflow likely)");
-            Err(LoadError::PreprocessError(
-                "パース中にスタックオーバーフローが発生した可能性があります。スクリプトの記法（特にトーク定義の「=>」やブロックの閉じ忘れ）を確認してください。".to_string()
-            ))
+            Err(LoadError::PreprocessError(Diagnostic::error(
+                "パース中にスタックオーバーフローが発生した可能性があります。スクリプトの記法（特にトーク定義の「=>」やブロックの閉じ忘れ）を確認してください。"
+            )))
         }
     }
 }
@@ -356,8 +358,9 @@ let _main_for_err = main.clone();
 let (all_talks, all_funcs, all_globals) = match load_program_guarded(&main) {
     Ok(result) => result,
 
-    Err(LoadError::PreprocessError(msg)) => {
+    Err(LoadError::PreprocessError(d)) => {
         // preprocessエラーはそのままメッセージを使う
+        let msg = render_legacy(&d);
         let state = ManatoState {
             codegen: Codegen::new(config.characters.clone(), HashMap::new(),dir.to_path_buf()) ,
             talks: HashMap::new(),
@@ -375,8 +378,8 @@ let (all_talks, all_funcs, all_globals) = match load_program_guarded(&main) {
         };
         return Ok(state);
     }
-Err(LoadError::ParseError(msgs, _err_path)) => {
-    let msg = msgs.join("\\n");
+Err(LoadError::ParseError(diags, _err_path)) => {
+    let msg = diags.iter().map(render_legacy).collect::<Vec<_>>().join("\\n");
 
     let state = ManatoState {
         codegen: Codegen::new(config.characters.clone(), HashMap::new(), dir.to_path_buf()),
@@ -418,12 +421,12 @@ let analyze_errors = Analyzer::new(talk_names, func_names)
     .analyze(&talks, &all_funcs);
 
 let error_only: Vec<_> = analyze_errors.iter()
-    .filter(|e| e.level == "error")
+    .filter(|e| e.level == Level::Error)
     .collect();
 
 if !error_only.is_empty() {
     let msg = error_only.iter()
-        .map(|e| format!("{}内 {}行目: {}", e.event, e.line, e.message))
+        .map(|e| render_legacy(e))
         .collect::<Vec<_>>()
         .join("\\n");
     // ... return Ok(state) でブロック
@@ -445,14 +448,14 @@ if !error_only.is_empty() {
     };
     return Ok(state);
 }
-           for _e in analyze_errors.iter().filter(|e| e.level == "notice") {
-    append_log!(format!("notice: {}内 {}行目: {}", _e.event, _e.line, _e.message));
+           for _e in analyze_errors.iter().filter(|e| e.level == Level::Notice) {
+    append_log!(format!("notice: {}", render_legacy(_e)));
 }
 
 // ★追加: 静的チェックのwarningは最初のイベント応答で一度だけ返す
 let analyze_warnings: Vec<(String, String)> = analyze_errors.iter()
-    .filter(|e| e.level == "warning")
-    .map(|e| ("warning".to_string(), format!("{}内 {}行目: {}", e.event, e.line, e.message)))
+    .filter(|e| e.level == Level::Warning)
+    .map(|e| (e.level.as_str().to_string(), render_legacy(e)))
     .collect();
 
 if let Some(_v) = talks.get("OnMouseDoubleClick") {
@@ -1843,3 +1846,63 @@ fn test_panic_bak_notice_delivered_even_on_parse_error() {
 }
 }
 
+
+// ── Diagnostic導入後もDLL側の文字列形式が従来どおりであることの確認 ──
+// （変化はファイル名が付くことのみ）
+#[cfg(test)]
+fn init_with_main(main: &str, extra: &[(&str, &str)]) -> ManatoState {
+    let dir = tempfile::tempdir().expect("tempdir作成失敗");
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[characters]\n\"湊\" = \"\\\\0\"\n",
+    ).expect("config.toml書き込み失敗");
+    std::fs::create_dir(dir.path().join("talks")).expect("talks作成失敗");
+    std::fs::write(dir.path().join("talks").join("main.mnt"), main).expect("main.mnt書き込み失敗");
+    for (name, body) in extra {
+        std::fs::write(dir.path().join("talks").join(name), body).expect("書き込み失敗");
+    }
+    let state = init(dir.path()).expect("init失敗");
+    drop(dir);
+    state
+}
+
+
+#[test]
+fn test_legacy_format_preprocess_error_has_file_name() {
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let state = init_with_main("OnBoot => {\n    let x =\n}\n", &[]);
+    assert_eq!(
+        state.parse_error.as_deref(),
+        Some("main.mntの2行目: 代入する値がありません。「let x =」の後に値を書いてください。")
+    );
+}
+
+#[test]
+fn test_legacy_format_preprocess_error_in_included_file() {
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let state = init_with_main(
+        "include \"sub.mnt\"\nOnBoot => {\n    湊: おはよう\n}\n",
+        &[("sub.mnt", "OnClose => {\n    let y =\n}\n")],
+    );
+    let msg = state.parse_error.expect("エラーになるはず");
+    assert!(msg.starts_with("sub.mntの2行目: "), "include先のファイル名が付いていない: {}", msg);
+}
+
+#[test]
+fn test_legacy_format_analyze_error() {
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let state = init_with_main("OnBoot => {\n    break\n}\n", &[]);
+    assert_eq!(
+        state.parse_error.as_deref(),
+        Some("OnBoot内 main.mntの2行目: ループの外で break を使っています")
+    );
+}
+
+#[test]
+fn test_legacy_format_parse_error() {
+    let _g = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let state = init_with_main("OnBoot => {\n    let x\n}\n", &[]);
+    let msg = state.parse_error.expect("エラーになるはず");
+    assert!(msg.starts_with("main.mntの2行目: "), "{}", msg);
+    assert!(!msg.contains('\n'), "改行を含んでいる: {:?}", msg);
+}

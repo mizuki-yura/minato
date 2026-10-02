@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use minato::analyzer::Analyzer;
+use minato::diagnostic::{render_legacy, Diagnostic, Level};
 use minato::parser::{load_program, AssignOp, Expr, LoadError, PathSegment, Spanned, Stmt, Talk};
 
 type LoadResult = Result<
@@ -38,14 +39,14 @@ fn run_load_program(main_mnt: &Path) -> LoadResult {
     match spawned {
         Ok(handle) => match handle.join() {
             Ok(result) => result,
-            Err(_) => Err(LoadError::PreprocessError(
-                "パース処理中に予期しないエラー（パニック）が発生しました".to_string(),
-            )),
+            Err(_) => Err(LoadError::PreprocessError(Diagnostic::error(
+                "パース処理中に予期しないエラー（パニック）が発生しました",
+            ))),
         },
-        Err(e) => Err(LoadError::PreprocessError(format!(
+        Err(e) => Err(LoadError::PreprocessError(Diagnostic::error(format!(
             "パース処理を開始できませんでした: {}",
             e
-        ))),
+        )))),
     }
 }
 
@@ -65,14 +66,14 @@ fn main() -> ExitCode {
 
     let (all_talks, all_funcs, _all_globals) = match run_load_program(&main_mnt) {
         Ok(r) => r,
-        Err(LoadError::PreprocessError(msg)) => {
-            eprintln!("[preprocess error] {}", msg);
+        Err(LoadError::PreprocessError(d)) => {
+            eprintln!("[preprocess error] {}", render_legacy(&d));
             return ExitCode::from(1);
         }
         Err(LoadError::ParseError(msgs, path)) => {
             eprintln!("構文エラー ({}):", path.display());
-            for m in &msgs {
-                eprintln!("  {}", m);
+            for d in &msgs {
+                eprintln!("  {}", render_legacy(d));
             }
             return ExitCode::from(1);
         }
@@ -99,8 +100,8 @@ fn main() -> ExitCode {
 
     let mut has_error = false;
     for e in &analyze_errors {
-        println!("[{}] {}内 {}行目: {}", e.level, e.event, e.line, e.message);
-        if e.level == "error" {
+        println!("[{}] {}", e.level.as_str(), render_legacy(e));
+        if e.level == Level::Error {
             has_error = true;
         }
     }
