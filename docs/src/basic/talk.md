@@ -33,6 +33,32 @@ OnRandomTalk => {
 }
 ```
 
+## ドット付きのイベント名
+
+SSPのイベントには、`OnUpdate.OnDownloadBegin` のようにドットを含むIDがあります。
+湊では、イベント名をそのままドット付きで書けます。
+
+```
+OnUpdate.OnDownloadBegin => {
+    湊: 更新ファイルをダウンロードしています。
+}
+
+OnUpdate.OnMD5CompareBegin => {
+    湊: ファイルを確認しています。
+}
+```
+
+条件フィルタ（`if(...)`）も、ドット無しのトークと同じように付けられます。
+
+```
+OnUpdate.OnDownloadBegin if(save.verbose) => {
+    湊: 少し時間がかかるかもしれません。
+}
+```
+
+ドット付きのトークは `call OnUpdate.OnDownloadBegin` のように呼び出すこともできます。
+ドット付きにできるのはトーク名だけです。`func` の名前にはドットを使えません。
+
 ## 主なイベント一覧
 
 | イベント名 | タイミング |
