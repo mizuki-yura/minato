@@ -2841,6 +2841,29 @@ OnChoiceSelect => {
     assert_eq!(out, "\\0呼ばれた。\\e");
 }
 #[test]
+fn test_dotted_talk_call_and_event() {
+    let src = r#"
+OnUpdate.OnDownloadBegin => {
+    湊: ダウンロード開始。
+}
+OnBoot => {
+    call OnUpdate.OnDownloadBegin
+}
+"#;
+    let talks = parse_talks(src);
+    let mut chars = HashMap::new();
+    chars.insert("湊".to_string(), "\\0".to_string());
+    let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+    for t in &talks {
+        talk_map.entry(t.event.clone()).or_default().push(t.clone());
+    }
+    let mut cg = Codegen::new(chars, talk_map.clone(), PathBuf::from("."));
+    let out = cg.gen_event("OnBoot", &talk_map["OnBoot"], &HashMap::new(), FIXED_TIME).unwrap();
+    assert_eq!(out, "\\0ダウンロード開始。\\e");
+    let out = cg.gen_event("OnUpdate.OnDownloadBegin", &talk_map["OnUpdate.OnDownloadBegin"], &HashMap::new(), FIXED_TIME).unwrap();
+    assert_eq!(out, "\\0ダウンロード開始。\\e");
+}
+#[test]
 fn test_not_call_in_or_expr() {
     let src = r#"OnBoot => {
     if (is_null(reference.0) || !talk_exists(reference.0)) {

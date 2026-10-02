@@ -120,6 +120,27 @@ Stmt::Call(expr) => {
                 });
             }
         }
+        Expr::Var(path) if path.len() >= 2 => {
+            // call reference.0 のように変数の値をイベント名として使う動的callが広く使われているため、
+            // ドット付きpathを一律に未定義扱いすると誤爆する。
+            // 「同じ path[0] + "." で始まるトーク群が定義されているのに該当名だけ無い」場合に限り、
+            // 打ち間違いの可能性が高いとして notice を出す。
+            let joined = path.join(".");
+            if !self.talk_names.contains(&joined) {
+                let prefix = format!("{}.", path[0]);
+                if self.talk_names.iter().any(|n| n.starts_with(&prefix)) {
+                    self.errors.push(AnalyzeError {
+                        level: "notice".to_string(),
+                        event: self.current_context.to_string(),
+                        message: format!(
+                            "\"{}\" は未定義です（同じ「{}」で始まるトークはありますが、この名前はありません）",
+                            joined, prefix
+                        ),
+                        line,
+                    });
+                }
+            }
+        }
         Expr::Call(name, _) => {
             if !is_builtin(name)
                 && !self.talk_names.contains(name)
@@ -525,4 +546,60 @@ OnMmmMiddle => {
         previous = Some(order);
     }
 }
+
+    fn analyze_src(src: &str) -> Vec<AnalyzeError> {
+        let (talks, funcs) = parse_talks_and_funcs(src);
+        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+        for t in &talks {
+            talk_map.entry(t.event.clone()).or_default().push(t.clone());
+        }
+        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
+        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
+        Analyzer::new(talk_names, func_names).analyze(&talk_map, &funcs)
+    }
+
+    fn undefined_notices(errors: &[AnalyzeError]) -> Vec<&AnalyzeError> {
+        errors.iter().filter(|e| e.level == "notice" && e.message.contains("未定義")).collect()
+    }
+
+    #[test]
+    fn test_dotted_call_typo_triggers_notice() {
+        let src = "OnUpdate.OnDownloadBegin => {\n    湊: 開始\n}\nOnBoot => {\n    湊: 起動\n    call OnUpdate.OnTypo\n}";
+        let errors = analyze_src(src);
+        let n = undefined_notices(&errors);
+        assert_eq!(n.len(), 1, "{:?}", errors);
+        assert!(n[0].message.contains("OnUpdate.OnTypo"));
+        assert_eq!(n[0].line, 6);
+    }
+
+    #[test]
+    fn test_dotted_call_defined_no_notice() {
+        let src = "OnUpdate.OnDownloadBegin => {\n    湊: 開始\n}\nOnBoot => {\n    call OnUpdate.OnDownloadBegin\n}";
+        assert!(undefined_notices(&analyze_src(src)).is_empty());
+    }
+
+    #[test]
+    fn test_dynamic_dotted_call_no_notice() {
+        let src = "OnUpdate.OnDownloadBegin => {\n    湊: 開始\n}\nOnChoiceSelect => {\n    call reference.0\n}";
+        assert!(undefined_notices(&analyze_src(src)).is_empty());
+    }
+
+    #[test]
+    fn test_dotted_call_without_group_no_notice() {
+        let src = "OnBoot => {\n    call save.next\n}";
+        assert!(undefined_notices(&analyze_src(src)).is_empty());
+    }
+
+    #[test]
+    fn test_dotted_call_similar_prefixes_defined_no_notice() {
+        let src = "OnUpdate.OnDownloadBegin => {\n    湊: a\n}\nOnUpdateOther.OnDownloadBegin => {\n    湊: b\n}\nOnBoot => {\n    call OnUpdate.OnDownloadBegin\n    call OnUpdateOther.OnDownloadBegin\n}";
+        assert!(undefined_notices(&analyze_src(src)).is_empty());
+    }
+
+    #[test]
+    fn test_dotted_call_prefix_includes_dot() {
+        // 「OnUpdate.」が「OnUpdateOther.」に前方一致で誤って当たらないこと
+        let src = "OnUpdate.OnDownloadBegin => {\n    湊: a\n}\nOnBoot => {\n    call OnUpdateOther.OnTypo\n}";
+        assert!(undefined_notices(&analyze_src(src)).is_empty());
+    }
 }

@@ -900,7 +900,14 @@ let expr_stmt = ident()
 
 pub fn talk<'a>() -> impl Parser<'a, &'a str, Talk, extra::Err<Rich<'a, char>>> + Clone {
     ws_nl()
-        .ignore_then(ident())
+        // SSPのドット付きイベントID（OnUpdate.OnDownloadBegin 等）もトーク名として受け付ける
+        .ignore_then(
+            ident()
+                .separated_by(just('.'))
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .map(|parts| parts.join("."))
+        )
         .then_ignore(ws_nl())
         // if(条件式) をオプションで受け取る
         .then(
@@ -1883,6 +1890,27 @@ fn test_rich_to_japanese_resolves_line_after_dialogue_merge() {
         "preprocess後にズレた行番号ではなく元ソースの4行目が報告されるべき: {}",
         msg
     );
+}
+
+#[test]
+fn test_talk_dotted_event_name() {
+    let src = "OnUpdate.OnDownloadBegin => {
+    湊: ダウンロード開始
+}
+OnUpdate.OnDownloadBegin if(true) => {
+    湊: 条件付き
+}
+OnBoot => {
+    湊: 起動
+}";
+    let pre = preprocess(src).expect("preprocess failed");
+    let items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
+    let talks: Vec<Talk> = items.into_iter().filter_map(|i| if let ProgramItem::Talk(t) = i { Some(t) } else { None }).collect();
+    assert_eq!(talks.len(), 3);
+    assert_eq!(talks[0].event, "OnUpdate.OnDownloadBegin");
+    assert_eq!(talks[1].event, "OnUpdate.OnDownloadBegin");
+    assert!(talks[1].cond.is_some());
+    assert_eq!(talks[2].event, "OnBoot");
 }
 
 #[cfg(test)]
