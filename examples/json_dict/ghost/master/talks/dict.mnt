@@ -1,0 +1,86 @@
+// dict.mnt - 辞書（ghost/master/dict.json）の読み書き
+//
+// main.mnt の先頭に  include "dict.mnt"  と書いて読み込みます。
+//
+// dict.json は「分類名 → 言葉の配列」の形にします。
+// {
+//   "挨拶": ["やあ。", "こんにちは。"],
+//   "話題": ["今日はいい天気だね。", "お茶でも飲もうか。"]
+// }
+//
+// 使い方
+//   dict_load()               … dict.json を読み込む（OnBoot で1回呼ぶ）
+//   dict_word("話題")         … その分類からランダムに1つ返す（無ければ空文字列）
+//   dict_add("話題", "言葉")  … 言葉を追加して dict.json に保存する
+//   dict_remove("話題", "言葉") … 言葉を削除して dict.json に保存する
+//   dict_count("話題")        … その分類の言葉の数
+//   dict_save()               … 今の辞書を dict.json に書き出す
+//
+// どの関数も戻り値（true/false など）を返します。関数呼び出しを単独の行に
+// 書くと戻り値がセリフに出てしまうので、 let ok = dict_load() のように受けてください。
+
+// 読み込みに失敗しても dict を空の辞書にしておけば、
+// 他の関数が null を相手にして警告を出し続けることがない。
+func dict_load() {
+    let text = file_read("ghost/master/dict.json")
+    if (is_null(text)) {
+        global dict = {}
+        return false
+    }
+    let data = json_parse(text)
+    if (is_null(data)) {
+        global dict = {}
+        return false
+    }
+    global dict = data
+    return true
+}
+
+// 整形して書くのは、dict.json を手で編集しやすくするため。
+func dict_save() {
+    let text = json_stringify(dict, true)
+    if (is_null(text)) {
+        return false
+    }
+    return file_write("ghost/master/dict.json", text)
+}
+
+// dict[分類] と直接書くと、無い分類で通知が出るので get を使う。
+func dict_word(cat) {
+    let words = get(dict, cat, [])
+    if (len(words) == 0) {
+        return ""
+    }
+    return words[rand() % len(words)]
+}
+
+func dict_count(cat) {
+    return len(get(dict, cat, []))
+}
+
+// 同じ言葉が既にあれば追加せず false を返す。
+func dict_add(cat, word) {
+    let words = get(dict, cat, [])
+    if (index_of(words, word) >= 0) {
+        return false
+    }
+    global dict[cat] = push(words, word)
+    return dict_save()
+}
+
+// 見つからなければ false を返す。配列から1つ取り除く関数が無いので、
+// 残す言葉だけで配列を作り直す。
+func dict_remove(cat, word) {
+    let words = get(dict, cat, [])
+    if (index_of(words, word) < 0) {
+        return false
+    }
+    let rest = []
+    foreach words as i, w {
+        if (w != word) {
+            rest = push(rest, w)
+        }
+    }
+    global dict[cat] = rest
+    return dict_save()
+}

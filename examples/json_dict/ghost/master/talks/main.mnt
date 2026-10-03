@@ -1,0 +1,21 @@
+// main.mnt - dict.mnt の使用例
+include "dict.mnt"
+
+OnBoot => {
+    // 関数呼び出しを単独の行に書くと戻り値がセリフに出てしまうので、変数で受ける
+    let loaded = dict_load()
+    [0]うきわ君:${dict_word("挨拶")}\w9今日も開発していこう。\w9
+}
+
+OnRandomTalk => {
+    [0]うきわ君:${dict_word("話題")}
+}
+
+// 例: 言葉を覚える（実際には入力ボックスの結果などから呼ぶ）
+OnRemember => {
+    if (dict_add("話題", "海に行きたいな。")) {
+        [0]うきわ君:新しい話題を覚えたよ。\w9いま${dict_count("話題")}個。
+    } else {
+        [0]うきわ君:それはもう知ってるよ。
+    }
+}
