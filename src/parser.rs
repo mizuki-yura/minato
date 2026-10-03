@@ -1004,7 +1004,15 @@ impl PreprocessResult {
 }
 
 /// エラー時のDiagnosticにはファイル名が入らない（呼び出し側のload_programが入れる）。
+/// 複数のエラーがあるときは先頭の1件を返す。全件が必要ならpreprocess_allを使う。
 pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
+    preprocess_all(src).map_err(|mut ds| ds.swap_remove(0))
+}
+
+/// preprocessと同じだが、エラーを途中で打ち切らず全件（行番号順）返す。
+/// エラーのある行は読み飛ばして処理を続ける。
+pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
+    let mut errors: Vec<Diagnostic> = Vec::new();
     let mut out = String::new();
     let mut line_map: Vec<u32> = Vec::new();
     let mut buf: Option<(String, u32)> = None;
@@ -1021,15 +1029,11 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
 
 
         if ends_with_bare_assign(trimmed) {
-            if let Some((b, start_line)) = buf.take() {
-                out.push_str(&b);
-                out.push('\n');
-                line_map.push(start_line);
-            }
-            return Err(Diagnostic::error(format!(
+            errors.push(Diagnostic::error(format!(
                 "代入する値がありません。「{}」の後に値を書いてください。",
                 trimmed
             )).at(line_num));
+            continue;
         }
 // is_in_map は「この行が始まる前のスタック状態」で決める。
         let is_in_map = matches!(brace_stack.last(), Some((BraceKind::Map, _)));
@@ -1078,8 +1082,13 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
             in_block_comment = !trimmed.contains("*/");
         }
         if !comment_line && matches!(kind, LineKind::Code | LineKind::Bare) {
-            let events = scan_braces(trimmed, &mut nesting_depth)
-                .map_err(|e| Diagnostic::error(e).at(line_num))?;
+            let events = match scan_braces(trimmed, &mut nesting_depth) {
+                Ok(evs) => evs,
+                Err(e) => {
+                    errors.push(Diagnostic::error(e).at(line_num));
+                    continue;
+                }
+            };
             for ev in events {
                 match ev {
                     BraceEvent::Open(k) => brace_stack.push((k, line_num)),
@@ -1150,9 +1159,13 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
     // 閉じ忘れはファイル末尾ではなく、開いた行で報告する。
     // 残ったうち最も内側（最後に開いたもの）が閉じ忘れの可能性が高い。
     if let Some(&(_, open_line)) = brace_stack.last() {
-        return Err(Diagnostic::error(format!("{}行目の「{{」が閉じられていません", open_line))
+        errors.push(Diagnostic::error(format!("{}行目の「{{」が閉じられていません", open_line))
             .at(open_line)
             .with_hint("対応する「}」を書いてください"));
+    }
+    if !errors.is_empty() {
+        errors.sort_by_key(|d| d.line());
+        return Err(errors);
     }
     Ok(PreprocessResult { src: out, line_map })
 }
@@ -1316,9 +1329,12 @@ pub fn load_program(
         ))?;
 
     append_log!("before preprocess");
-    let pre = match preprocess(&orig_text) {
+    let pre = match preprocess_all(&orig_text) {
         Ok(r) => r,
-        Err(d) => return Err(LoadError::PreprocessError(d.in_file(file_name.as_str()))),
+        Err(ds) => {
+            let diags = ds.into_iter().map(|d| d.in_file(file_name.as_str())).collect();
+            return Err(LoadError::ParseError(diags, entry.to_path_buf()));
+        }
     };
     let src: &str = &pre.src;
     append_log!("after preprocess");
@@ -1587,15 +1603,35 @@ pub fn program_with_include<'a>() -> impl Parser<'a, &'a str, Vec<ProgramItem>, 
         )
         .map(|((name, params), body)| ProgramItem::FuncDef { name, params, body });
 
+    // エラー回復：トップレベル項目の解析に失敗したら、次の項目の開始行
+    // （行頭から始まり「=>」を含む行、またはinclude/func/global）まで読み飛ばし、
+    // 解析を続ける。これにより1ファイル内の複数のエラーを報告できる。
+    let line = none_of('\n').repeated().to_slice();
+    let is_item_start = |s: &str| {
+        s.chars().next().is_some_and(|c| !c.is_whitespace() && c != '}')
+            && (s.contains("=>")
+                || ["include", "func", "global"].iter().any(|k| s.starts_with(k)))
+    };
+    let skip_item = none_of('\n').repeated().at_least(1)
+        .then(
+            just('\n')
+                .ignore_then(line.filter(move |s: &&str| !is_item_start(s)))
+                .repeated()
+        )
+        .to(None);
+
     ws_nl()
         .ignore_then(
             include_directive()
                 .or(top_global)
                 .or(top_func)
                 .or(talk().map(ProgramItem::Talk))
+                .map(Some)
+                .recover_with(via_parser(skip_item))
         )
         .repeated()
         .collect::<Vec<_>>()
+        .map(|items| items.into_iter().flatten().collect::<Vec<_>>())
         .then_ignore(ws_nl())
         .then_ignore(end().labelled("ファイルの末尾に予期しない内容があります"))
 }
@@ -2118,4 +2154,27 @@ fn test_parse_error_diagnostic_has_col() {
     let d = rich_to_diagnostic(&errors[0], &pre, orig, "main.mnt");
     assert_eq!(d.line(), Some(2));
     assert_eq!(d.col(), Some(5), "{:?}", d);
+}
+
+#[test]
+fn test_parse_errors_reported_for_each_talk() {
+    let orig = "OnBoot => {\n    let y\n}\n\nOnClose => {\n    let x\n}\n\nOnOk => {\n    湊: ok\n}\n";
+    let pre = preprocess(orig).expect("preprocess failed");
+    let errors = program_with_include()
+        .parse(&*pre.src)
+        .into_result()
+        .expect_err("構文エラーになるはず");
+    let lines: Vec<_> = errors.iter()
+        .map(|e| rich_to_diagnostic(e, &pre, orig, "main.mnt").line())
+        .collect();
+    assert_eq!(lines, vec![Some(2), Some(6)], "{:?}", errors);
+}
+
+#[test]
+fn test_preprocess_all_reports_every_error() {
+    // 「hoge =」の後も処理を続け、OnBootの「{」の閉じ忘れも報告する
+    let src = "OnBoot => {\n\n    {\n        hoge =\n    }\n\nOnClose => {\n    湊: じゃ\n}\n";
+    let ds = preprocess_all(src).err().expect("エラーになるはず");
+    let lines: Vec<_> = ds.iter().map(|d| d.line()).collect();
+    assert_eq!(lines, vec![Some(1), Some(4)], "{:?}", ds);
 }
