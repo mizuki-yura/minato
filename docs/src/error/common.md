@@ -95,3 +95,29 @@ OnBoot => {
     }
 }
 ```
+
+## ファイルやJSONが読み込めない
+
+`file_read` や `json_parse` は、失敗しても台本を止めずに `null` を返します。
+そのまま使うと、後の処理で別の警告が出て原因がわかりにくくなるので、`is_null` で確かめてください。
+
+```
+let text = file_read("ghost/master/items.json")
+if (is_null(text)) {
+    湊: items.json が読めませんでした。
+}
+```
+
+失敗した理由は、応答の `ErrorLevel` / `ErrorDescription` に警告として載ります。よくある原因は次のとおりです。
+
+| 症状 | 原因 | 対処 |
+|---|---|---|
+| `file_read` が `null` | パスが違う | パスはゴーストのホーム（`ghost` フォルダの1つ上）から書きます。`"items.json"` ではなく `"ghost/master/items.json"` |
+| `file_read` が `null` | ファイルが1MBを超えている | ファイルを分けてください |
+| `file_read` が `null` | Shift_JIS のファイルを UTF-8 として読んだ | 第2引数に `"sjis"` を指定します |
+| `json_parse` が `null` | JSONの書き方の誤り（末尾の余分な `,`、コメント、`'` で囲んだ文字列など） | 警告の「JSONの読み込みに失敗しました（1行目9文字目: 書き方が正しくありません）」の位置を見て直してください |
+| `file_write` が `false` | 書き込めない場所を指定した | 書けるのは `ghost/master` の中だけです。`talks` フォルダや `config.toml` などには書けません |
+| エラーになる | 絶対パスや `..` を含むパスを指定した | 禁止されたパスは警告ではなくエラーになります。相対パスで書いてください |
+| `file_move` が `false` | 移動先に同名のファイルがある | 上書きするなら第3引数に `true` を指定します |
+
+制限の一覧は[ファイルとJSON](../file/index.md#できることできないこと)にあります。

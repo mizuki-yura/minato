@@ -40,6 +40,8 @@
 
 - [include](include.md)
 
+- [ファイルとJSON](file/index.md)
+
 - [エラーと対処](error/index.md)
   - [パースエラーの読み方](error/parse.md)
   - [よくあるミス](error/common.md)
