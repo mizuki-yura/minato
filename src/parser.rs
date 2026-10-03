@@ -1092,7 +1092,16 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
             for ev in events {
                 match ev {
                     BraceEvent::Open(k) => brace_stack.push((k, line_num)),
-                    BraceEvent::Close => { brace_stack.pop(); }
+                    BraceEvent::Close => {
+                        // 閉じすぎの「}」は本来パーサが見つけるが、前処理で
+                        // 別のエラーがあるとパーサまで進まず報告されないため、
+                        // 閉じ忘れと対にしてここで報告する
+                        if brace_stack.pop().is_none() {
+                            errors.push(Diagnostic::error(format!("{}行目の「}}」に対応する「{{」がありません", line_num))
+                                .at(line_num)
+                                .with_hint("余分な「}」を消してください"));
+                        }
+                    }
                 }
             }
         }
@@ -2177,4 +2186,14 @@ fn test_preprocess_all_reports_every_error() {
     let ds = preprocess_all(src).err().expect("エラーになるはず");
     let lines: Vec<_> = ds.iter().map(|d| d.line()).collect();
     assert_eq!(lines, vec![Some(1), Some(4)], "{:?}", ds);
+}
+
+#[test]
+fn test_preprocess_all_reports_extra_close_brace() {
+    // 「hoge =」と、末尾の余分な「}」の両方を報告する
+    let src = "OnClose => {\n    hoge =\n    湊: じゃ\n}\n}\n";
+    let ds = preprocess_all(src).err().expect("エラーになるはず");
+    let lines: Vec<_> = ds.iter().map(|d| d.line()).collect();
+    assert_eq!(lines, vec![Some(2), Some(5)], "{:?}", ds);
+    assert!(ds[1].message.contains("5行目の「}」に対応する「{」がありません"), "{:?}", ds[1]);
 }
