@@ -412,7 +412,7 @@ fn append_script_log(msg: &str, dir: &std::path::Path) {
 }
 
 
-const FILE_READ_LIMIT: u64 = 1024 * 1024;
+pub(crate) const FILE_READ_LIMIT: u64 = 1024 * 1024;
 
 const WINDOWS_RESERVED: &[&str] = &[
     "con", "prn", "aux", "nul",
@@ -581,6 +581,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "first", "last", "push", "pop", "slice",
     "has_key", "keys", "values", "delete",
     "count", "sort", "reverse", "unique",
+    "json_parse", "json_stringify",
     "get_property", "choose", "days_since", "saori", "log" , "is_null","format","talk_exists","get", "days_between", 
         "file_read", "file_write", "file_append", "file_move",
 ];
@@ -1899,6 +1900,41 @@ else {
     }
 }
 
+
+// json_parse / json_stringifyは、失敗時のNullを正しいJSONのnullと
+// 区別できるようwarningを積む必要があるため、push_errが使えるここに置く。
+"json_parse" => {
+    match vals.get(0) {
+        Some(Value::Str(s)) => match crate::json::parse(s) {
+            Ok(v) => v,
+            Err(msg) => { self.push_err("warning", msg); Value::Null }
+        },
+        // file_readが失敗したときのNullもここに来る。file_read側で
+        // 既にwarningが出ているので、原因が分かるよう型名を添える
+        other => {
+            let got = match other {
+                None => "引数なし",
+                Some(Value::Null) => "null",
+                Some(Value::Number(_)) => "数値",
+                Some(Value::Bool(_)) => "真偽値",
+                Some(Value::Array(_)) => "配列",
+                Some(Value::Map(_)) => "マップ",
+                Some(Value::Str(_)) => unreachable!(),
+            };
+            self.push_err("warning", format!("json_parseには文字列を渡してください（{}が渡されました）", got));
+            Value::Null
+        }
+    }
+}
+
+"json_stringify" => {
+    let v = vals.get(0).cloned().unwrap_or(Value::Null);
+    let pretty = vals.get(1).map(|p| p.as_bool()).unwrap_or(false);
+    match crate::json::stringify(&v, pretty) {
+        Ok(s) => Value::Str(s),
+        Err(msg) => { self.push_err("warning", format!("json_stringify: {}", msg)); Value::Null }
+    }
+}
 
 "format" => {
     let fmt = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
@@ -4424,6 +4460,159 @@ OnRandomTalk if(false) => {
     fn run_in(cg: &mut Codegen, src: &str) -> String {
         let talks = parse_talks(src);
         cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME)
+    }
+
+    // ── json_parse / json_stringify ──────────────────────────
+
+    #[test]
+    fn test_json_parse_file_with_bom() {
+        let (_home, master) = make_ghost_home();
+        std::fs::write(master.join("items.json"), "\u{feff}{\"薬草\": {\"値段\": 10}}").unwrap();
+        let mut cg = make_file_gen(&master);
+        let out = run_in(&mut cg, r#"OnBoot => {
+    global items = json_parse(file_read('ghost/master/items.json'))
+    湊: ${items.薬草.値段}
+}"#);
+        assert_eq!(out, "\\0 10\\e".replace(' ', ""));
+        assert!(cg.errors.is_empty(), "{:?}", cg.errors);
+    }
+
+    #[test]
+    fn test_json_parse_broken_warns_and_returns_null() {
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    湊: ${json_parse('{"a": 1,') ?? '壊れている'}
+}"#);
+        assert_eq!(out, "\\0壊れている\\e");
+        assert!(cg.errors.iter().any(|(l, m)| l == "warning" && m.contains("JSONの読み込みに失敗しました")), "{:?}", cg.errors);
+        assert!(cg.errors.iter().all(|(_, m)| !m.contains('\n')));
+    }
+
+    #[test]
+    fn test_json_parse_valid_null_does_not_warn() {
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    湊: ${json_parse('null') ?? 'null'}
+}"#);
+        assert_eq!(out, "\\0null\\e");
+        assert!(cg.errors.is_empty(), "正しいnullでwarningを出してはいけない: {:?}", cg.errors);
+    }
+
+    #[test]
+    fn test_json_parse_non_string_warns() {
+        let mut cg = make_gen();
+        run_in(&mut cg, r#"OnBoot => {
+    湊: ${json_parse(123) ?? ''}
+}"#);
+        assert!(cg.errors.iter().any(|(l, m)| l == "warning" && m.contains("数値が渡されました")), "{:?}", cg.errors);
+    }
+
+    #[test]
+    fn test_json_stringify_compact_and_pretty() {
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    let m = json_parse('{"z":1,"a":[true,null,"x"]}')
+    湊: ${json_stringify(m)}
+}"#);
+        assert_eq!(out, "\\0{\"z\":1,\"a\":[true,null,\"x\"]}\\e");
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    湊: ${count(json_stringify(json_parse('{"a":1,"b":2}'), true), chr(10))}
+}"#);
+        // 整形すると「{」「"a": 1,」「"b": 2」「}」の4行（改行3つ）になる
+        assert_eq!(out, "\\03\\e");
+    }
+
+    #[test]
+    fn test_json_stringify_write_and_read_back() {
+        let (_home, master) = make_ghost_home();
+        let mut cg = make_file_gen(&master);
+        run_in(&mut cg, r#"OnBoot => {
+    let p = json_parse('{"進行":{"章":3,"名前":"湊"}}')
+    file_write('ghost/master/out.json', json_stringify(p, true))
+}"#);
+        let written = std::fs::read_to_string(master.join("out.json")).unwrap();
+        assert_eq!(crate::json::parse(&written).map(|v| crate::json::stringify(&v, false)).unwrap().unwrap(),
+            r#"{"進行":{"章":3,"名前":"湊"}}"#);
+    }
+
+    #[test]
+    fn test_json_stringify_too_deep_warns_and_returns_null() {
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    let v = 1
+    for (let i = 0; i < 200; i++) {
+        v = [v]
+    }
+    湊: ${json_stringify(v) ?? '深すぎ'}
+}"#);
+        assert_eq!(out, "\\0深すぎ\\e");
+        assert!(cg.errors.iter().any(|(l, m)| l == "warning" && m.contains("深すぎます")), "{:?}", cg.errors);
+    }
+
+    #[test]
+    fn test_json_stringify_too_large_warns_and_returns_null() {
+        let mut cg = make_gen();
+        cg.env.globals.insert("big".to_string(), Value::Str("a".repeat(crate::json::MAX_OUTPUT)));
+        let out = run_in(&mut cg, r#"OnBoot => {
+    湊: ${json_stringify(big) ?? '大きすぎ'}
+}"#);
+        assert_eq!(out, "\\0大きすぎ\\e");
+        assert!(cg.errors.iter().any(|(l, m)| l == "warning" && m.contains("大きすぎます")), "{:?}", cg.errors);
+    }
+
+    /// 大きなJSONをglobalに読み込み、ループ内で要素を引いたときの所要時間を測る。
+    /// Array/Mapはアクセスのたびに複製されるため、Arcによる
+    /// Copy-on-Writeへ改修するかの判断材料にする。debugビルドでは遅く出すぎるので
+    /// 通常のテストからは外し、次のように実行する:
+    ///   cargo test --release --lib bench_json_access -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_json_access() {
+        // 約1MBのアイテム表（5000件の配列と、同じ内容をidで引くMap）
+        let mut arr = Vec::new();
+        let mut map = Vec::new();
+        for i in 0..5000 {
+            let item = format!(r#"{{"id":{i},"name":"アイテム{i}","hp":{},"memo":"{}"}}"#, i % 100, "x".repeat(120));
+            map.push(format!(r#""k{i}":{item}"#));
+            arr.push(item);
+        }
+        let arr_json = format!("[{}]", arr.join(","));
+        let map_json = format!("{{{}}}", map.join(","));
+        let (_home, master) = make_ghost_home();
+        std::fs::write(master.join("arr.json"), &arr_json).unwrap();
+        std::fs::write(master.join("map.json"), &map_json).unwrap();
+        println!("arr.json: {} bytes / map.json: {} bytes", arr_json.len(), map_json.len());
+
+        let mut cg = make_file_gen(&master);
+        let t = std::time::Instant::now();
+        run_in(&mut cg, r#"OnBoot => {
+    global arr = json_parse(file_read('ghost/master/arr.json'))
+    global tbl = json_parse(file_read('ghost/master/map.json'))
+}"#);
+        println!("読み込み（2ファイル）: {:?}", t.elapsed());
+        assert!(cg.errors.is_empty(), "{:?}", cg.errors);
+
+        for n in [100, 500] {
+            for (label, expr) in [
+                ("配列 arr[i].hp", "arr[i].hp"),
+                ("Map tbl['k'+i].hp", "tbl['k' + i].hp"),
+                ("パス tbl.k1.hp", "tbl.k1.hp"),
+                // 値そのものを渡す使い方（参照で辿る改修の対象外）
+                ("関数に渡す first_hp(arr)", "first_hp(arr)"),
+            ] {
+                let src = format!("OnBoot => {{\n    func first_hp(a) {{\n        return a[1].hp\n    }}\n    let s = 0\n    for (let i = 0; i < {n}; i++) {{\n        s += {expr}\n    }}\n    湊: ${{s}}\n}}");
+                let t = std::time::Instant::now();
+                let out = run_in(&mut cg, &src);
+                let el = t.elapsed();
+                println!("{label} × {n}回: {:?}（1回 {:?}） 出力={out}", el, el / n);
+                assert!(cg.errors.is_empty(), "{:?}", cg.errors);
+            }
+        }
+        // foreachは配列全体を1回複製してから回る。1周あたりの重さの目安として測る
+        let t = std::time::Instant::now();
+        let out = run_in(&mut cg, "OnBoot => {\n    let s = 0\n    foreach arr as i, v {\n        s += v.hp\n    }\n    湊: ${s}\n}");
+        println!("foreach arr（5000件）: {:?} 出力={out}", t.elapsed());
     }
 
 

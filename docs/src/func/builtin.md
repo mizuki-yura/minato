@@ -160,6 +160,30 @@ OnBoot => {
 
 `saori` の詳細は[SAORI連携](../saori/saori.md)を参照してください。
 
+## JSON
+
+| 関数 | 説明 | 戻り値 |
+|---|---|---|
+| `json_parse(s)` | JSONの文字列を値（マップ・配列など）に変換する | 変換した値。失敗したら `null` |
+| `json_stringify(v, pretty)` | 値をJSONの文字列に変換する。`pretty` が `true` なら字下げ付き、省略すると1行 | JSONの文字列。失敗したら `null` |
+
+ファイルの読み書きは `file_read` / `file_write` と組み合わせます。
+
+```
+OnBoot => {
+    global items = json_parse(file_read("ghost/master/items.json"))
+    湊: 薬草は${items.薬草.値段}円。
+    file_write("ghost/master/out.json", json_stringify(save, true))
+}
+```
+
+- マップのキーは、JSONに書かれた順（台本で入れた順）のまま保たれます。
+- 先頭にBOMが付いたJSONも読めます。
+- 読み込みに失敗したとき（JSONの書き方の誤りなど）は `null` になり、警告が出ます。JSONの `null` を正しく読んだ場合は警告は出ません。
+- 数値は内部ではすべて小数として扱います。整数で表せる値は `100` のように整数で書き出します。ただし 9007199254740992（2の53乗）を超える整数は正確には扱えません。
+- JSONで表せない数値（NaN・無限大）は `null` として書き出します。
+- `json_stringify` は、入れ子が100段を超える値や、結果が1MB（`file_read` で読める上限）を超える値は変換せず、警告を出して `null` を返します。
+
 ## ファイル操作
 
 | 関数 | 説明 | 戻り値 |

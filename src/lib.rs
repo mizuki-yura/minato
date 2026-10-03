@@ -6,6 +6,7 @@ mod sstp;
 // SSPなしで動くCLI構文チェッカー（src/bin/minato_check.rs）から使うためpub
 pub mod parser;
 mod codegen;
+mod json;
 mod config;
 mod runtime;
 mod saori;
@@ -880,7 +881,7 @@ fn save_globals(globals: &HashMap<String, Value>, dir: &Path) -> Result<(), Stri
     // save.* を保存
     if let Some(Value::Map(m)) = globals.get("save") {
         let save_json: serde_json::Map<String, serde_json::Value> = m.iter()
-            .map(|(k, v)| (k.clone(), value_to_json(v)))
+            .filter_map(|(k, v)| persisted_json(k, v))
             .collect();
         json_map.insert("save".to_string(), serde_json::Value::Object(save_json));
     }
@@ -889,8 +890,8 @@ fn save_globals(globals: &HashMap<String, Value>, dir: &Path) -> Result<(), Stri
     if let Some(Value::Map(m)) = globals.get("system") {
         let mut system_json: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for key in  PERSISTED_SYSTEM_KEYS {
-            if let Some(v) = m.get(*key) {
-                system_json.insert(key.to_string(), value_to_json(v));
+            if let Some((k, j)) = m.get(*key).and_then(|v| persisted_json(key, v)) {
+                system_json.insert(k, j);
             }
         }
         if !system_json.is_empty() {
@@ -920,6 +921,20 @@ fn save_globals(globals: &HashMap<String, Value>, dir: &Path) -> Result<(), Stri
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
+/// save.jsonに書く1項目をJSONに変換する。入れ子が深すぎる項目は飛ばす。
+/// 1項目のせいで保存全体が失敗すると、他の正常なセーブデータまで
+/// 失われるため、その項目だけを諦める。unload中で台本のwarningとして
+/// 出す先が無いので、ログにだけ残す。
+fn persisted_json(key: &str, v: &Value) -> Option<(String, serde_json::Value)> {
+    match json::value_to_json(v) {
+        Ok(j) => Some((key.to_string(), j)),
+        Err(_e) => {
+            append_log!(format!("save.json: 「{}」を保存しませんでした: {}", key, _e));
+            None
+        }
+    }
+}
+
 /// save.jsonのsystem.*を返り値として返す。
 /// system.*だけは「台本のトップレベルglobalより、save.jsonに永続化された値を
 /// 常に優先する」ため、apply_top_globals適用後にもう一度このsystem.*を
@@ -940,7 +955,7 @@ fn load_globals(codegen: &mut Codegen, dir: &Path) -> Result<Option<Value>, Stri
     let mut persisted_system: Option<Value> = None;
     if let serde_json::Value::Object(map) = val {
         for (k, v) in map {
-            let value = json_to_value(v);
+            let value = json::json_to_value(v);
             if k == "system" {
                 merge_system_globals(&mut codegen.env.globals, value.clone());
                 persisted_system = Some(value);
@@ -969,30 +984,6 @@ for (k, v) in loaded_map {
     }
 }
     globals.insert("system".to_string(), Value::Map(existing_map));
-}
-fn json_to_value(v: serde_json::Value) -> codegen::Value {
-    match v {
-        serde_json::Value::Null => codegen::Value::Null,
-        serde_json::Value::Bool(b) => codegen::Value::Bool(b),
-        serde_json::Value::Number(n) => codegen::Value::Number(n.as_f64().unwrap_or(0.0)),
-        serde_json::Value::String(s) => codegen::Value::Str(s),
-        serde_json::Value::Array(a) => codegen::Value::Array(a.into_iter().map(json_to_value).collect()),
-         serde_json::Value::Object(o) => codegen::Value::Map(
-            o.into_iter()
-                .map(|(k, v)| (k, json_to_value(v)))
-                .collect::<IndexMap<_, _>>()  // ← 変更
-        ),
-    }
-}
-fn value_to_json(v: &Value) -> serde_json::Value {
-    match v {
-        Value::Str(s) => serde_json::Value::String(s.clone()),
-        Value::Number(n) => serde_json::json!(*n),
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Array(a) => serde_json::Value::Array(a.iter().map(value_to_json).collect()),
-        Value::Map(m) => serde_json::Value::Object(m.iter().map(|(k,v)| (k.clone(), value_to_json(v))).collect()),
-        Value::Null => serde_json::Value::Null,
-    }
 }
 
 
@@ -1184,10 +1175,8 @@ mod save_load_tests {
     }
 
     // ── IndexMapのキー順序 ───────────────────────────────────
-    // JSON Object → IndexMap の変換でinsert順が保たれるか
-    // serde_json は Object のキー順を保証しないが、
-    // save_globals が pretty_print するので順序は記録される。
-    // ただし json_to_value 経由で IndexMap に戻す際の順序を確認する。
+    // serde_jsonのpreserve_orderにより、save.* のキー順が
+    // 保存→読み込みを経ても台本で入れた順のまま保たれるか
 
     #[test]
     fn test_roundtrip_key_order() {
@@ -1212,12 +1201,30 @@ mod save_load_tests {
         };
 
         let restored_keys: Vec<&str> = save.keys().map(|s| s.as_str()).collect();
-        // serde_json::Map はキー順を保証しないので、
-        // 順序ではなく「全キーが揃っているか」だけ確認する
-        for k in &keys {
-            assert!(save.contains_key(*k), "キー「{}」が消えた", k);
-        }
-        assert_eq!(restored_keys.len(), keys.len());
+        assert_eq!(restored_keys, keys, "キー順が保たれていない");
+    }
+
+    // ── 深すぎる値はその項目だけ保存しない ──────────────────
+
+    #[test]
+    fn test_too_deep_save_item_is_skipped() {
+        let dir = temp_dir();
+        let mut cg = make_gen();
+
+        let mut deep = Value::Null;
+        for _ in 0..(json::MAX_DEPTH + 10) { deep = Value::Array(vec![deep]); }
+        let mut m = IndexMap::new();
+        m.insert("deep".to_string(), deep);
+        m.insert("ok".to_string(), Value::Number(3.0));
+        cg.env.globals.insert("save".to_string(), Value::Map(m));
+
+        save_globals(&cg.env.globals, dir.path()).expect("save失敗");
+
+        let mut gen2 = make_gen();
+        load_globals(&mut gen2, dir.path()).expect("load失敗");
+        let Some(Value::Map(save)) = gen2.env.globals.get("save") else { panic!("saveが無い") };
+        assert!(!save.contains_key("deep"), "深すぎる項目は保存されないはず");
+        assert!(matches!(save.get("ok"), Some(Value::Number(n)) if *n == 3.0));
     }
 
 
