@@ -1,0 +1,80 @@
+// rpg.mnt - ダンジョンRPGのデータと計算
+//
+// main.mnt の先頭に  include "rpg.mnt"  と書いて読み込みます。
+//
+// アイテム表（ghost/master/items.json）とモンスター表（ghost/master/monsters.json）を
+// JSONで読み込みます。表を書き換えれば、台本を直さずに値段や強さを変えられます。
+//
+// 使い方
+//   rpg_load()           … 2つの表を読み込む（OnBoot で1回呼ぶ）。読めたら true
+//   rpg_init()           … 初めて遊ぶときの主人公の状態を save に作る
+//   random_monster()     … モンスター表からランダムに1体の名前を返す
+//   start_battle(name)   … その名前のモンスターとの戦闘を始める（battle に入る）
+//   attack_power()       … 主人公の攻撃力（素の攻撃力 + 装備した武器）
+//   bag_add(name)        … 持ち物を1つ増やす
+//   bag_remove(name)     … 持ち物を1つ減らす（0個になったら持ち物から消す）
+//
+// 主人公の状態は save に置くので、ゴーストを閉じても残ります。
+// 戦闘中のモンスター（battle）は save に置かないので、閉じると戦闘は終わります。
+
+// 読み込みに失敗したら空の表にしておく。そうすれば他の関数が null を相手に
+// 警告を出し続けることがない。
+func load_table(path) {
+    let text = file_read(path)
+    if (is_null(text)) {
+        return {}
+    }
+    let data = json_parse(text)
+    if (is_null(data)) {
+        return {}
+    }
+    return data
+}
+
+func rpg_load() {
+    global items = load_table("ghost/master/items.json")
+    global monsters = load_table("ghost/master/monsters.json")
+    return len(items) > 0 && len(monsters) > 0
+}
+
+// ?= なので、2回目以降の起動では前回の状態がそのまま使われる。
+func rpg_init() {
+    global save.hp ?= 30
+    global save.max_hp ?= 30
+    global save.atk ?= 3
+    global save.gold ?= 20
+    global save.bag ?= {}
+    global save.weapon ?= ""
+}
+
+func random_monster() {
+    let names = keys(monsters)
+    return names[rand() % len(names)]
+}
+
+// 表の行をそのまま battle に写し、名前を足す。HPは戦闘中に減らすので、
+// 表（monsters）ではなく写した battle の方を書き換える。
+func start_battle(name) {
+    global battle = get(monsters, name, {})
+    global battle.名前 = name
+}
+
+func attack_power() {
+    if (save.weapon == "") {
+        return save.atk
+    }
+    return save.atk + get(get(items, save.weapon, {}), "攻撃", 0)
+}
+
+func bag_add(name) {
+    global save.bag[name] = get(save.bag, name, 0) + 1
+}
+
+func bag_remove(name) {
+    let n = get(save.bag, name, 0) - 1
+    if (n <= 0) {
+        global save.bag = delete(save.bag, name)
+    } else {
+        global save.bag[name] = n
+    }
+}

@@ -1,0 +1,145 @@
+// main.mnt - ダンジョンRPGのサンプル
+//
+// 探索するとモンスターに出会ったり、宝を見つけたりします。
+// 店ではアイテム表（items.json）の品物を買え、持ち物から薬草を使ったり剣を装備したりできます。
+// 選択肢は \q[表示,イベント名,値] で書き、選ばれた値は reference["0"] で受け取ります。
+include "rpg.mnt"
+
+OnBoot => {
+    // 関数呼び出しを単独の行に書くと戻り値がセリフに出てしまうので、変数で受ける
+    let loaded = rpg_load()
+    rpg_init()
+    if (loaded) {
+        [0]うきわ君:ダンジョンの入口に着いたよ。\w9HP${save.hp}/${save.max_hp}、${save.gold}ゴールド。
+        call メニュー
+    } else {
+        [0]うきわ君:アイテム表かモンスター表が読めなかったよ。
+    }
+}
+
+メニュー => {
+    \q[探索する,OnExplore]
+    \q[持ち物,OnBag]
+    \q[店,OnShop]
+}
+
+OnMenu => {
+    [0]うきわ君:どうする？
+    call メニュー
+}
+
+// ---- 探索・戦闘 ----
+
+OnExplore => {
+    let r = rand() % 10
+    if (r < 6) {
+        start_battle(random_monster())
+        call 戦闘開始
+    } else if (r < 8) {
+        let g = rand() % 10 + 1
+        global save.gold += g
+        [0]うきわ君:宝箱だ！\w9${g}ゴールド入ってた。
+        call メニュー
+    } else {
+        bag_add("薬草")
+        [0]うきわ君:薬草を拾ったよ。
+        call メニュー
+    }
+}
+
+戦闘開始 => {
+    [0]うきわ君:${battle.名前}が現れた！（HP${battle.HP}）
+    call 戦闘の選択肢
+}
+
+戦闘の選択肢 => {
+    \q[戦う,OnAttack]
+    \q[逃げる,OnMenu]
+}
+
+OnAttack => {
+    let dmg = attack_power()
+    global battle.HP -= dmg
+    if (battle.HP <= 0) {
+        global save.gold += battle.ゴールド
+        let drop = battle.落とす
+        if (drop != "") {
+            bag_add(drop)
+        }
+        [0]うきわ君:${battle.名前}に${dmg}のダメージ！\w9倒した！\w9${battle.ゴールド}ゴールド手に入れた。${choose(drop != "", drop + "を拾った。", "")}
+        call メニュー
+    } else {
+        global save.hp -= battle.攻撃
+        if (save.hp <= 0) {
+            // 倒れたら所持金が半分になって入口に戻る
+            global save.gold = floor(save.gold / 2)
+            global save.hp = save.max_hp
+            [0]うきわ君:${battle.名前}に${dmg}のダメージ！\w9……でもやられちゃった。\w9お金を半分なくして入口に戻ったよ。
+            call メニュー
+        } else {
+            [0]うきわ君:${battle.名前}に${dmg}のダメージ！（残りHP${battle.HP}）\w9${battle.攻撃}のダメージを受けた。（HP${save.hp}/${save.max_hp}）
+            call 戦闘の選択肢
+        }
+    }
+}
+
+// ---- 持ち物 ----
+
+OnBag => {
+    if (len(save.bag) == 0) {
+        [0]うきわ君:何も持ってないよ。
+        call メニュー
+    } else {
+        [0]うきわ君:何を使う？（HP${save.hp}/${save.max_hp}、攻撃力${attack_power()}）
+        // \q[...] だけの行は、直前がセリフの行でないと ${...} が展開されない。
+        // foreach の中では話者を付けたセリフの行として書く。
+        foreach save.bag as name, n {
+            うきわ君:\q[${name}×${n},OnUse,${name}]
+        }
+        \q[戻る,OnMenu]
+    }
+}
+
+OnUse => {
+    let name = reference["0"]
+    let item = get(items, name, {})
+    if (get(save.bag, name, 0) == 0) {
+        [0]うきわ君:${name}は持ってないよ。
+    } else if (item.種類 == "回復" && save.hp >= save.max_hp) {
+        [0]うきわ君:HPは減ってないよ。
+    } else if (item.種類 == "回復") {
+        let heal = min(item.回復, save.max_hp - save.hp)
+        global save.hp += heal
+        bag_remove(name)
+        [0]うきわ君:${name}を使った。\w9HPが${heal}回復した。（HP${save.hp}/${save.max_hp}）
+    } else if (item.種類 == "武器") {
+        global save.weapon = name
+        [0]うきわ君:${name}を装備した。\w9攻撃力が${attack_power()}になった。
+    }
+    call メニュー
+}
+
+// ---- 店 ----
+
+// 品ぞろえはアイテム表の順。items.json に行を足せば店にも並ぶ。
+OnShop => {
+    [0]うきわ君:いらっしゃい。\w9（所持金${save.gold}ゴールド）
+    // 持ち物と同じく、foreach の中の選択肢は話者を付けて書く
+    foreach items as name, item {
+        うきわ君:\q[${name}（${item.値段}G）,OnBuy,${name}]
+    }
+    \q[戻る,OnMenu]
+}
+
+OnBuy => {
+    let name = reference["0"]
+    let price = get(get(items, name, {}), "値段", 0)
+    if (save.gold < price) {
+        [0]うきわ君:お金が足りないよ。\w9（${price}ゴールド必要）
+    } else {
+        global save.gold -= price
+        bag_add(name)
+        [0]うきわ君:${name}を買った。\w9（残り${save.gold}ゴールド）
+    }
+    call メニュー
+}
