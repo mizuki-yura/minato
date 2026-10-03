@@ -544,18 +544,13 @@ fn dialogue<'a>() -> impl Parser<'a, &'a str, Stmt, extra::Err<Rich<'a, char>>> 
         });
 
  
-// キャラ指定なし: \- や \e など（バックスラッシュで始まる行のみ）
+// キャラ指定なし: \- や \e、\q[...] など（バックスラッシュで始まる行のみ）
 let without_chara = surface()
     .or_not()
     .then(
         // バックスラッシュで始まることを要求
-        just('\\')
-            .ignore_then(
-                any().filter(|&c: &char| c != '\r' && c != '\n')
-                    .repeated()
-                    .collect::<String>()
-            )
-            .map(|rest| vec![StrPart::Lit(format!("\\{}", rest))])
+        // セリフ行と同じく ${...} を展開する（foreach直下の \q[${v},…] など）
+        just('\\').rewind().ignore_then(interpolated_str(expr()))
     )
     .then_ignore(ws())
     .then_ignore(
@@ -2196,4 +2191,41 @@ fn test_preprocess_all_reports_extra_close_brace() {
     let lines: Vec<_> = ds.iter().map(|d| d.line()).collect();
     assert_eq!(lines, vec![Some(2), Some(5)], "{:?}", ds);
     assert!(ds[1].message.contains("5行目の「}」に対応する「{」がありません"), "{:?}", ds[1]);
+}
+
+#[test]
+fn test_standalone_tag_line_expands_interpolation() {
+    // セリフに続かない \q[...] 行（foreach直下など）でも ${...} を展開する
+    let src = r#"OnShop => {
+    うきわ君:いらっしゃい
+    foreach ["x", "y"] as i, v {
+        \q[${v},OnB,${v}]
+    }
+    \-
+}"#;
+    let pre = preprocess(src).expect("preprocess failed");
+    let items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
+    let ProgramItem::Talk(t) = &items[0] else { panic!("talkではない") };
+    let Stmt::ForEach { body, .. } = &t.body[1].node else { panic!("foreachではない: {:?}", t.body[1].node) };
+    let Stmt::Dialogue(line) = &body[0].node else { panic!("セリフではない") };
+    assert!(line.character.is_none());
+    assert!(matches!(line.content.as_slice(),
+        [StrPart::Lit(a), StrPart::Expr(_), StrPart::Lit(b), StrPart::Expr(_), StrPart::Lit(c)]
+            if a == r"\q[" && b == ",OnB," && c == "]"), "{:?}", line.content);
+    let Stmt::Dialogue(end) = &t.body[2].node else { panic!("セリフではない") };
+    assert!(matches!(end.content.as_slice(), [StrPart::Lit(s)] if s == r"\-"), "{:?}", end.content);
+}
+
+#[test]
+fn test_dotted_word_in_dialogue_is_variable_reference() {
+    // docs/src/error/common.md「セリフ中の「名前.名前」が消える」の前提
+    let src = "OnBoot => {\n    湊: items.jsonを読む\n    湊: ${\"items.json\"}を読む\n}";
+    let pre = preprocess(src).expect("preprocess failed");
+    let items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
+    let ProgramItem::Talk(t) = &items[0] else { panic!("talkではない") };
+    let Stmt::Dialogue(ng) = &t.body[0].node else { panic!() };
+    assert!(matches!(ng.content.as_slice(), [StrPart::Expr(Expr::Index(..)), StrPart::Lit(_)]), "{:?}", ng.content);
+    let Stmt::Dialogue(ok) = &t.body[1].node else { panic!() };
+    assert!(matches!(ok.content.as_slice(), [StrPart::Expr(Expr::InterpolatedStr(p)), StrPart::Lit(_)]
+        if matches!(p.as_slice(), [StrPart::Lit(s)] if s == "items.json")), "{:?}", ok.content);
 }

@@ -91,10 +91,8 @@ OnBag => {
         call メニュー
     } else {
         [0]うきわ君:何を使う？（HP${save.hp}/${save.max_hp}、攻撃力${attack_power()}）
-        // \q[...] だけの行は、直前がセリフの行でないと ${...} が展開されない。
-        // foreach の中では話者を付けたセリフの行として書く。
         foreach save.bag as name, n {
-            うきわ君:\q[${name}×${n},OnUse,${name}]
+            \q[${name}×${n},OnUse,${name}]
         }
         \q[戻る,OnMenu]
     }
@@ -124,9 +122,8 @@ OnUse => {
 // 品ぞろえはアイテム表の順。items.json に行を足せば店にも並ぶ。
 OnShop => {
     [0]うきわ君:いらっしゃい。\w9（所持金${save.gold}ゴールド）
-    // 持ち物と同じく、foreach の中の選択肢は話者を付けて書く
     foreach items as name, item {
-        うきわ君:\q[${name}（${item.値段}G）,OnBuy,${name}]
+        \q[${name}（${item.値段}G）,OnBuy,${name}]
     }
     \q[戻る,OnMenu]
 }
