@@ -96,10 +96,16 @@ impl Env {
     fn pop_scope(&mut self)  { self.locals.pop(); }
 
     fn get(&self, key: &str) -> Value {
+        self.get_ref(key).cloned().unwrap_or(Value::Null)
+    }
+
+    /// getの参照版。大きな配列・Mapの一部だけを読みたいときに、
+    /// 全体を複製せずに中を辿るために使う。
+    fn get_ref(&self, key: &str) -> Option<&Value> {
         for scope in self.locals.iter().rev() {
-            if let Some(v) = scope.get(key) { return v.clone(); }
+            if let Some(v) = scope.get(key) { return Some(v); }
         }
-        self.globals.get(key).cloned().unwrap_or(Value::Null)
+        self.globals.get(key)
     }
 
     #[allow(dead_code)]
@@ -119,9 +125,14 @@ impl Env {
         match path {
             [] => Value::Null,
             [key] => self.get(key),
+            // 先頭の変数を丸ごと複製してから辿ると、1MBのJSONを読み込んだ
+            // globalの要素を1つ読むだけで1MB複製することになる。
+            // 参照のまま辿り、最後に取り出す値だけを複製する
             [head, rest @ ..] => {
-                let root = self.get(head);
-                get_nested_str(root, rest)
+                self.get_ref(head)
+                    .and_then(|root| get_nested_str_ref(root, rest))
+                    .cloned()
+                    .unwrap_or(Value::Null)
             }
         }
     }
@@ -270,26 +281,18 @@ fn get_nested(val: Value, path: &[PathSegment], env: &Env) -> Value {
         _ => Value::Null,
     }
 }
-fn get_nested_str(val: Value, path: &[String]) -> Value {
+/// 文字列のパス（${save.a.b}など）で値を辿り、参照を返す。辿れなければNone。
+/// set_nested_str と同様に、数値のキーなら配列の添字として扱う
+/// （${arr.0} のような読み取りが常にNullになる非対称を防ぐため）。
+fn get_nested_str_ref<'a>(val: &'a Value, path: &[String]) -> Option<&'a Value> {
     match (val, path) {
-        (v, []) => v,
-        (Value::Map(mut m), [key, rest @ ..]) => {
-            let child = m.shift_remove(key).unwrap_or(Value::Null);
-            get_nested_str(child, rest)
-        }
-        // set_nested_str は数値キーで配列を辿れるが、
-        // こちら（読み取り側）は元々Mapしか扱っておらず、
-        // ${arr.0} が常にNullになる非対称があった。
+        (v, []) => Some(v),
+        (Value::Map(m), [key, rest @ ..]) => get_nested_str_ref(m.get(key)?, rest),
         (Value::Array(arr), [key, rest @ ..]) => {
-            match key.parse::<usize>() {
-                Ok(i) => {
-                    let child = arr.get(i).cloned().unwrap_or(Value::Null);
-                    get_nested_str(child, rest)
-                }
-                Err(_) => Value::Null,
-            }
+            let i = key.parse::<usize>().ok()?;
+            get_nested_str_ref(arr.get(i)?, rest)
         }
-        _ => Value::Null,
+        _ => None,
     }
 }
 
@@ -996,6 +999,50 @@ fn eval_str_with_vars(s: &str, env: &Env) -> String {
     out
 }
 
+/// 辿れなかったときに参照を返すための共有のNull。
+static NULL_VALUE: Value = Value::Null;
+
+/// 値bを添字iで引いた要素への参照を返す。引けなければ、出すべき
+/// エラーの(レベル, メッセージ)を返す。メッセージ中の名前はbaseの式から作る。
+/// 呼び出し側が変数への参照を持ったままでも使えるよう、push_errは呼ばない。
+fn index_ref<'a>(base: &Expr, b: &'a Value, i: &Value) -> Result<&'a Value, (&'static str, String)> {
+    match (b, i) {
+        (Value::Array(arr), Value::Number(n)) => {
+            let n = *n;
+            if n >= 0.0 && n.fract() == 0.0 && (n as usize) < arr.len() {
+                Ok(&arr[n as usize])
+            } else {
+                let name = describe_expr(base).unwrap_or_else(|| "配列".to_string());
+                let idx = Value::Number(n).to_display();
+                let msg = if arr.is_empty() {
+                    format!("{}[{}] は存在しません（{} は空の配列です）", name, idx, name)
+                } else {
+                    format!("{}[{}] は存在しません（要素数 {}、有効な添字は 0〜{}）", name, idx, arr.len(), arr.len() - 1)
+                };
+                Err(("warning", msg))
+            }
+        }
+        (Value::Map(map), key) => {
+            let k = key.to_display();
+            match map.get(&k) {
+                Some(v) => Ok(v),
+                None => {
+                    let base_name = describe_expr(base).unwrap_or_else(|| "Map".to_string());
+                    let name = format!("{}.{}", base_name, k);
+                    Err(("notice", format!("{} というキーはありません{}", name, describe_map_keys(map))))
+                }
+            }
+        }
+        _ => {
+            let msg = match describe_expr(base) {
+                Some(name) => format!("{} は配列でもMapでもないため添字アクセスできません", name),
+                None => "添字アクセスの対象が配列でもMapでもないため添字アクセスできません".to_string(),
+            };
+            Err(("warning", msg))
+        }
+    }
+}
+
 /// エラーメッセージ用に、式を台本上の名前で表す（items / save.name / items[3] など）。
 fn describe_expr(e: &Expr) -> Option<String> {
     match e {
@@ -1303,15 +1350,8 @@ self.current_scope = None;
     /// 先頭が未定義・途中がNull/空Mapなどは「まだ入っていない」意図的な
     /// 参照と区別できないので、従来どおり黙ってNullを返す。
     fn get_path_checked(&mut self, path: &[String]) -> Value {
-        if let [head, mid @ .., last] = path {
-            let parent = get_nested_str(self.env.get(head), mid);
-            if let Value::Map(m) = &parent {
-                if !m.is_empty() && !m.contains_key(last) {
-                    let msg = format!("{} というキーはありません{}", path.join("."), describe_map_keys(m));
-                    self.push_err("notice", msg);
-                    return Value::Null;
-                }
-            }
+        if self.get_path_checked_notice(path).is_some() {
+            return Value::Null;
         }
         self.env.get_path_str(path)
     }
@@ -2079,47 +2119,7 @@ Some('s') => {
                 }
             }
 
-            Expr::Index(base, idx) => {
-                let b = self.eval_expr_full(base); let i = self.eval_expr_full(idx);
-                match (b, i) {
-                    (Value::Array(arr), Value::Number(n)) => {
-                        if n >= 0.0 && n.fract() == 0.0 && (n as usize) < arr.len() {
-                            arr[n as usize].clone()
-                        } else {
-                            let name = describe_expr(base).unwrap_or_else(|| "配列".to_string());
-                            let idx = Value::Number(n).to_display();
-                            let msg = if arr.is_empty() {
-                                format!("{}[{}] は存在しません（{} は空の配列です）", name, idx, name)
-                            } else {
-                                format!("{}[{}] は存在しません（要素数 {}、有効な添字は 0〜{}）", name, idx, arr.len(), arr.len() - 1)
-                            };
-                            self.push_err("warning", msg);
-                            Value::Null
-                        }
-                    }
-                    (Value::Map(map), key) => {
-                        let k = key.to_display();
-                        match map.get(&k) {
-                            Some(v) => v.clone(),
-                            None => {
-                                let base_name = describe_expr(base).unwrap_or_else(|| "Map".to_string());
-                                let name = format!("{}.{}", base_name, k);
-                                let keys = describe_map_keys(&map);
-                                self.push_err("notice", format!("{} というキーはありません{}", name, keys));
-                                Value::Null
-                            }
-                        }
-                    }
-                    _ => {
-                        let msg = match describe_expr(base) {
-                            Some(name) => format!("{} は配列でもMapでもないため添字アクセスできません", name),
-                            None => "添字アクセスの対象が配列でもMapでもないため添字アクセスできません".to_string(),
-                        };
-                        self.push_err("warning", msg);
-                        Value::Null
-                    }
-                }
-            }
+            Expr::Index(_, _) => self.eval_index_chain(expr),
 
             Expr::InterpolatedStr(parts) => {
                 let parts = parts.clone();
@@ -2169,6 +2169,78 @@ Expr::Var(path) => self.get_path_checked(path),
     }
 
     // ── ヘルパー群 ────────────────────────────────────────
+
+    /// arr[i].hp のような添字アクセスの連なりを評価する。
+    /// 根元が変数なら、変数を丸ごと複製せず参照のまま辿り、
+    /// 最後に取り出す値だけを複製する。1MBのJSONを読み込んだglobalを
+    /// ループ内で引くと、1回ごとに全体を複製して数msかかっていたため。
+    /// 添字の式は辿り始める前に全部評価しておく（評価にはpush_errなどで
+    /// &mut selfが要り、変数への参照を持ったままでは呼べないため）。
+    fn eval_index_chain(&mut self, expr: &Expr) -> Value {
+        // 外側から集めて、根元→外側の順に並べ直す
+        let mut steps: Vec<(&Expr, &Expr)> = Vec::new();
+        let mut cur = expr;
+        while let Expr::Index(base, idx) = cur {
+            steps.push((&**base, &**idx));
+            cur = base;
+        }
+        steps.reverse();
+
+        let mut errs: Vec<(&'static str, String)> = Vec::new();
+        let result = if let Expr::Var(path) = cur {
+            // 根元の未定義キーのnoticeは従来どおり先に出す
+            let root_missing = self.get_path_checked_notice(path).is_some();
+            let keys: Vec<Value> = steps.iter().map(|(_, i)| self.eval_expr_full(i)).collect();
+            let root = if root_missing {
+                None
+            } else {
+                match path.as_slice() {
+                    [] => None,
+                    [head, rest @ ..] => self.env.get_ref(head).and_then(|r| get_nested_str_ref(r, rest)),
+                }
+            };
+            let mut v: &Value = root.unwrap_or(&NULL_VALUE);
+            for ((base, _), key) in steps.iter().zip(&keys) {
+                v = match index_ref(base, v, key) {
+                    Ok(r) => r,
+                    Err(e) => { errs.push(e); &NULL_VALUE }
+                };
+            }
+            v.clone()
+        } else {
+            // 根元が関数呼び出しなどの一時的な値なら、複製の問題は無いので素直に評価する
+            let mut v = self.eval_expr_full(cur);
+            for (base, idx) in &steps {
+                let key = self.eval_expr_full(idx);
+                v = match index_ref(base, &v, &key) {
+                    Ok(r) => r.clone(),
+                    Err(e) => { errs.push(e); Value::Null }
+                };
+            }
+            v
+        };
+        for (level, msg) in errs {
+            self.push_err(level, msg);
+        }
+        result
+    }
+
+    /// get_path_checkedのうち、キーの打ち間違いを検出してnoticeを出す部分。
+    /// noticeを出したらSome(())を返す。
+    fn get_path_checked_notice(&mut self, path: &[String]) -> Option<()> {
+        if let [head, mid @ .., last] = path {
+            let missing = match self.env.get_ref(head).and_then(|r| get_nested_str_ref(r, mid)) {
+                Some(Value::Map(m)) if !m.is_empty() && !m.contains_key(last) => Some(describe_map_keys(m)),
+                _ => None,
+            };
+            if let Some(keys) = missing {
+                let msg = format!("{} というキーはありません{}", path.join("."), keys);
+                self.push_err("notice", msg);
+                return Some(());
+            }
+        }
+        None
+    }
 
     // codegen.rs — impl Codegen 内、「── ヘルパー群 ──」の直後あたりに追加
 
@@ -4460,6 +4532,44 @@ OnRandomTalk if(false) => {
     fn run_in(cg: &mut Codegen, src: &str) -> String {
         let talks = parse_talks(src);
         cg.gen_talk(&talks[0], &HashMap::new(), FIXED_TIME)
+    }
+
+    // ── 添字アクセスの連なり（参照で辿る経路） ────────────────
+
+    #[test]
+    fn test_index_chain_reads_nested_value() {
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    let t = {"a": [{"hp": 3}, {"hp": 7}]}
+    let i = 1
+    湊: ${t.a[i].hp}|${t["a"][0]["hp"]}
+}"#);
+        assert_eq!(out, "\\07|3\\e");
+        assert!(cg.errors.is_empty(), "{:?}", cg.errors);
+    }
+
+    #[test]
+    fn test_index_chain_failure_messages_unchanged() {
+        // 途中で辿れなくなったら、その段のwarningに続けて、
+        // Nullを添字アクセスしたwarningも従来どおり出る
+        let (_, errs) = run_errors(r#"OnBoot => {
+    let items = [{"hp": 1}]
+    湊: ${items[3].hp ?? 'なし'}
+}"#);
+        let msgs: Vec<&str> = errs.iter().map(|(_, m)| m.as_str()).collect();
+        assert_eq!(msgs.len(), 2, "{:?}", msgs);
+        assert!(msgs[0].contains("items[3] は存在しません（要素数 1、有効な添字は 0〜0）"), "{:?}", msgs);
+        assert!(msgs[1].contains("items[3] は配列でもMapでもないため添字アクセスできません"), "{:?}", msgs);
+    }
+
+    #[test]
+    fn test_index_chain_on_call_result() {
+        // 根元が変数でない（一時的な値の）場合も同じように辿れる
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    湊: ${json_parse('{"a":[5,6]}').a[1]}
+}"#);
+        assert_eq!(out, "\\06\\e");
     }
 
     // ── json_parse / json_stringify ──────────────────────────
