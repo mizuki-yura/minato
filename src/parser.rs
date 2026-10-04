@@ -194,6 +194,8 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Expr, extra::Err<Rich<'a, char>>> + Cl
             .ignore_then(
                 just("\\\\").to(StrPart::Lit("\\\\".to_string()))
                     .or(var_part_interp)
+                    // 「{」が続かない「$」はただの文字（"10$" など）
+                    .or(just('$').then_ignore(just('{').not()).to(StrPart::Lit("$".to_string())))
                     .or(
                         just('\\')
                             .then(
@@ -501,7 +503,12 @@ fn interpolated_str<'a>(
         .collect::<String>()
         .map(StrPart::Lit);
 
-    var_part.or(bare_var).or(sakura_tag).or(lit_part)
+    // 「{」が続かない「$」はただの文字（「10$だね。」など）
+    let lone_dollar = just('$')
+        .then_ignore(just('{').not())
+        .to(StrPart::Lit("$".to_string()));
+
+    var_part.or(bare_var).or(sakura_tag).or(lone_dollar).or(lit_part)
         .repeated()
         .collect::<Vec<_>>()
 }
@@ -2228,4 +2235,34 @@ fn test_dotted_word_in_dialogue_is_variable_reference() {
     let Stmt::Dialogue(ok) = &t.body[1].node else { panic!() };
     assert!(matches!(ok.content.as_slice(), [StrPart::Expr(Expr::InterpolatedStr(p)), StrPart::Lit(_)]
         if matches!(p.as_slice(), [StrPart::Lit(s)] if s == "items.json")), "{:?}", ok.content);
+}
+
+#[test]
+fn test_lone_dollar_is_literal() {
+    // 「{」が続かない「$」は、セリフ・\ の行・"…" のどれでもただの文字
+    let src = r#"OnBoot => {
+    湊: 10$だね。
+    \![open,browser,https://example.com/?a=$5]
+    湊: ${"a$b$"}
+}"#;
+    let pre = preprocess(src).expect("preprocess failed");
+    let items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
+    let ProgramItem::Talk(t) = &items[0] else { panic!("talkではない") };
+    let lit = |i: usize| -> String {
+        let Stmt::Dialogue(d) = &t.body[i].node else { panic!("セリフではない: {:?}", t.body[i].node) };
+        d.content.iter().map(|p| match p { StrPart::Lit(s) => s.clone(), _ => panic!("式がある: {:?}", d.content) }).collect()
+    };
+    assert_eq!(lit(0), "10$だね。");
+    assert_eq!(lit(1), r"\![open,browser,https://example.com/?a=$5]");
+    let Stmt::Dialogue(d) = &t.body[2].node else { panic!() };
+    assert!(matches!(d.content.as_slice(), [StrPart::Expr(Expr::InterpolatedStr(p))]
+        if p.iter().map(|x| match x { StrPart::Lit(s) => s.as_str(), _ => "?" }).collect::<String>() == "a$b$"), "{:?}", d.content);
+}
+
+#[test]
+fn test_unclosed_interpolation_is_still_error() {
+    // 「$」を文字として読むようにしても、閉じていない「${」は今までどおりエラー
+    let src = "OnBoot => {\n    湊: ${abc\n}";
+    let pre = preprocess(src).expect("preprocess failed");
+    assert!(program_with_include().parse(&*pre.src).into_result().is_err());
 }
