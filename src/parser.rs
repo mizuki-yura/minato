@@ -1046,6 +1046,9 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
             LineKind::Dialogue
         } else if trimmed.starts_with('\\') && buf.is_some() && !is_control_backslash(trimmed) {
             LineKind::TagAppend
+        } else if !is_in_map && trimmed.starts_with('\\') && !is_control_backslash(trimmed) {
+            // 直前にセリフがない \q[...] 等の行。続く \ 行を改行付きで連結できるよう buf を始める
+            LineKind::TagStart
         } else if trimmed.is_empty()
             || trimmed.starts_with("//")
             || trimmed.starts_with("/*")
@@ -1138,6 +1141,10 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
                 prev_chara = cur_chara;
                 buf = Some((line_clean, line_num));
             }
+            LineKind::TagStart => {
+                prev_chara = None;
+                buf = Some((line.to_string(), line_num));
+            }
             LineKind::TagAppend | LineKind::Continuation => {
                 if let Some((ref mut b, _)) = buf {
                     b.push_str("\\n");
@@ -1191,6 +1198,7 @@ enum LineKind {
     Separator,     // ";" 単独
     Dialogue,      // セリフの先頭行
     TagAppend,     // 直前の発話に連結する \q[...] 等
+    TagStart,      // bufが無い状態で来た \q[...] 等。続く \ 行の連結先になる
     Code,          // ブロック・制御構文など、構文として読む行
     Continuation,  // 直前の発話の続き（コロンなしの本文）
     Bare,          // bufが無い状態で来た単独の行
@@ -1709,6 +1717,18 @@ fn test_preprocess_multiline_dialogue_inside_for_loop() {
 }"#;
     let out = preprocess(src).expect("preprocess failed").src;
     assert!(out.contains("ほげ\\nふが"));
+}
+
+#[test]
+fn test_preprocess_choice_lines_without_dialogue_joined_with_newline() {
+    // 直前にセリフがない \q 行が続くときも、見た目どおり \n で連結される
+    let src = r#"メニュー => {
+    \q[探索する,OnExplore]
+    \q[持ち物,OnBag]
+    \q[店,OnShop]
+}"#;
+    let out = preprocess(src).expect("preprocess failed").src;
+    assert!(out.contains("\\q[探索する,OnExplore]\\n\\q[持ち物,OnBag]\\n\\q[店,OnShop]"));
 }
 
 

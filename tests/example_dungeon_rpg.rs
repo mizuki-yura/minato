@@ -14,8 +14,8 @@ use winapi::shared::minwindef::HGLOBAL;
 use winapi::um::winbase::{GlobalAlloc, GlobalFree, GMEM_FIXED};
 
 const GET_PROPERTY_SUFFIX_HEAD: &str = "\\![get,property,OnGotVirtualTime,";
-const MENU: &str = "\\q[探索する,OnExplore]\\q[持ち物,OnBag]\\q[店,OnShop]";
-const BATTLE: &str = "\\q[戦う,OnAttack]\\q[逃げる,OnMenu]";
+const MENU: &str = "\\q[探索する,OnExplore]\\n\\q[持ち物,OnBag]\\n\\q[店,OnShop]";
+const BATTLE: &str = "\\q[戦う,OnAttack]\\n\\q[逃げる,OnMenu]";
 
 const TEST_EVENTS: &str = "
 OnTestBattle => {
