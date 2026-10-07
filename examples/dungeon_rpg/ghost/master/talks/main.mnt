@@ -106,7 +106,7 @@ OnUse => {
     } else if (item.種類 == "回復" && save.hp >= save.max_hp) {
         [0]うきわ君:HPは減ってないよ。
     } else if (item.種類 == "回復") {
-        let heal = min(item.回復, save.max_hp - save.hp)
+        let heal = min(num_field(item, "回復"), save.max_hp - save.hp)
         global save.hp += heal
         bag_remove(name)
         [0]うきわ君:${name}を使った。\w9HPが${heal}回復した。（HP${save.hp}/${save.max_hp}）
@@ -123,14 +123,14 @@ OnUse => {
 OnShop => {
     [0]うきわ君:いらっしゃい。\w9（所持金${save.gold}ゴールド）
     foreach items as name, item {
-        \q[${name}（${item.値段}G）,OnBuy,${name}]
+        \q[${name}（${num_field(item, "値段")}G）,OnBuy,${name}]
     }
     \q[戻る,OnMenu]
 }
 
 OnBuy => {
     let name = reference["0"]
-    let price = get(get(items, name, {}), "値段", 0)
+    let price = num_field(get(items, name, {}), "値段")
     if (save.gold < price) {
         [0]うきわ君:お金が足りないよ。\w9（${price}ゴールド必要）
     } else {

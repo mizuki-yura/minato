@@ -73,7 +73,8 @@ fn example_json_dict_works() {
     fs::copy(ex.join("dict.json"), master.join("dict.json")).unwrap();
     fs::copy(ex.join("talks/dict.mnt"), master.join("talks/dict.mnt")).unwrap();
     let main = fs::read_to_string(ex.join("talks/main.mnt")).unwrap()
-        + "\nOnForget => {\n    [0]うきわ君:${dict_remove(\"話題\", \"海に行きたいな。\")}|${dict_remove(\"話題\", \"無い言葉\")}|${dict_count(\"話題\")}\n}\n";
+        + "\nOnForget => {\n    [0]うきわ君:${dict_remove(\"話題\", \"海に行きたいな。\")}|${dict_remove(\"話題\", \"無い言葉\")}|${dict_count(\"話題\")}\n}\n"
+        + "\nOnReload => {\n    let ok = dict_load()\n    [0]うきわ君:${ok}|${dict_count(\"挨拶\")}|${dict_word(\"挨拶\")}|${dict_count(\"話題\")}\n}\n";
     fs::write(master.join("talks/main.mnt"), main).unwrap();
 
     assert_eq!(load(&master), 1, "loaduに失敗");
@@ -106,6 +107,14 @@ fn example_json_dict_works() {
     // 他の分類とキー順はそのまま
     let text = fs::read_to_string(master.join("dict.json")).unwrap();
     assert!(text.find("\"挨拶\"").unwrap() < text.find("\"話題\"").unwrap(), "{}", text);
+
+    // 分類の中身が配列でなくても、空の分類として扱い警告を出さない
+    fs::write(master.join("dict.json"), r#"{"挨拶": "やあ。", "話題": ["海に行きたいな。"]}"#).unwrap();
+    assert_eq!(value_of("OnReload", &send("OnReload")), "\\0\\s[0]true|0||1\\e");
+
+    // 全体がマップでなければ読み込み失敗として空の辞書にする
+    fs::write(master.join("dict.json"), "[1, 2]").unwrap();
+    assert_eq!(value_of("OnReload", &send("OnReload")), "\\0\\s[0]false|0||0\\e");
 
     minato::unload();
 }

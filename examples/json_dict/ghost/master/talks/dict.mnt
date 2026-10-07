@@ -21,6 +21,7 @@
 
 // 読み込みに失敗しても dict を空の辞書にしておけば、
 // 他の関数が null を相手にして警告を出し続けることがない。
+// JSONとして正しくても、中身がマップでなければ（配列や数値だけなど）失敗として扱う。
 func dict_load() {
     let text = file_read("ghost/master/dict.json")
     if (is_null(text)) {
@@ -28,7 +29,7 @@ func dict_load() {
         return false
     }
     let data = json_parse(text)
-    if (is_null(data)) {
+    if (!is_map(data)) {
         global dict = {}
         return false
     }
@@ -45,9 +46,20 @@ func dict_save() {
     return file_write("ghost/master/dict.json", text)
 }
 
+// その分類の言葉の配列を返す。
 // dict[分類] と直接書くと、無い分類で通知が出るので get を使う。
-func dict_word(cat) {
+// dict.json を手で書き間違えて "挨拶": "やあ。" のように配列でなくなっていても、
+// 空の配列として扱えば、他の関数がそのまま動く。
+func dict_words(cat) {
     let words = get(dict, cat, [])
+    if (!is_array(words)) {
+        return []
+    }
+    return words
+}
+
+func dict_word(cat) {
+    let words = dict_words(cat)
     if (len(words) == 0) {
         return ""
     }
@@ -55,12 +67,12 @@ func dict_word(cat) {
 }
 
 func dict_count(cat) {
-    return len(get(dict, cat, []))
+    return len(dict_words(cat))
 }
 
 // 同じ言葉が既にあれば追加せず false を返す。
 func dict_add(cat, word) {
-    let words = get(dict, cat, [])
+    let words = dict_words(cat)
     if (index_of(words, word) >= 0) {
         return false
     }
@@ -71,7 +83,7 @@ func dict_add(cat, word) {
 // 見つからなければ false を返す。配列から1つ取り除く関数が無いので、
 // 残す言葉だけで配列を作り直す。
 func dict_remove(cat, word) {
-    let words = get(dict, cat, [])
+    let words = dict_words(cat)
     if (index_of(words, word) < 0) {
         return false
     }

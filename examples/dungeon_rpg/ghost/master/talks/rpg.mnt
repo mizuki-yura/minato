@@ -19,16 +19,37 @@
 
 // 読み込みに失敗したら空の表にしておく。そうすれば他の関数が null を相手に
 // 警告を出し続けることがない。
+// JSONとして正しくても、中身がマップでなければ（配列や数値だけなど）失敗として扱う。
+// 行（"薬草": {...} の {...}）がマップでないものは、書き間違いとして読み飛ばす。
 func load_table(path) {
     let text = file_read(path)
     if (is_null(text)) {
         return {}
     }
     let data = json_parse(text)
-    if (is_null(data)) {
+    if (!is_map(data)) {
         return {}
     }
-    return data
+    let table = {}
+    foreach data as name, row {
+        if (is_map(row)) {
+            table[name] = row
+        }
+    }
+    return table
+}
+
+// 行の数値の欄を読む。表を手で書いて "値段": "10" のように文字列にしてしまっても
+// 数値に直して使い、欄が無いときや数値でも文字列でもないときは 0 にする。
+func num_field(row, key) {
+    let v = get(row, key, 0)
+    if (is_num(v)) {
+        return v
+    }
+    if (is_str(v)) {
+        return to_num(v)
+    }
+    return 0
 }
 
 func rpg_load() {
@@ -52,18 +73,26 @@ func random_monster() {
     return names[rand() % len(names)]
 }
 
-// 表の行をそのまま battle に写し、名前を足す。HPは戦闘中に減らすので、
-// 表（monsters）ではなく写した battle の方を書き換える。
+// 表の行から battle を作り、名前を足す。HPは戦闘中に減らすので、
+// 表（monsters）ではなく作った battle の方を書き換える。
+// 数値の欄は num_field で、落とす物は文字列かどうかを確かめてから写す。
 func start_battle(name) {
-    global battle = get(monsters, name, {})
-    global battle.名前 = name
+    let row = get(monsters, name, {})
+    let drop = get(row, "落とす", "")
+    global battle = {
+        "名前": name,
+        "HP": num_field(row, "HP"),
+        "攻撃": num_field(row, "攻撃"),
+        "ゴールド": num_field(row, "ゴールド"),
+        "落とす": choose(is_str(drop), drop, "")
+    }
 }
 
 func attack_power() {
     if (save.weapon == "") {
         return save.atk
     }
-    return save.atk + get(get(items, save.weapon, {}), "攻撃", 0)
+    return save.atk + num_field(get(items, save.weapon, {}), "攻撃")
 }
 
 func bag_add(name) {

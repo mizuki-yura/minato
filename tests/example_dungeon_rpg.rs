@@ -182,4 +182,31 @@ fn example_dungeon_rpg_works() {
     assert!(resp.contains("ErrorDescription:"), "警告が出ていない: {}", resp);
     assert!(resp.contains("Value: \\0\\s[0]アイテム表かモンスター表が読めなかったよ。"), "{}", resp);
     minato::unload();
+
+    // items.jsonがJSONとして正しくてもマップでなければ、読めなかったことにする
+    let home3 = tempfile::tempdir().unwrap();
+    let master3 = setup(home3.path(), Some("[1, 2]"));
+    assert_eq!(load(&master3), 1, "loaduに失敗");
+    assert_eq!(talk("OnBoot", ""), say("アイテム表かモンスター表が読めなかったよ。", ""));
+    minato::unload();
+
+    // マップでない行は読み飛ばし、文字列で書いた数値は数値として使う（警告は出ない）
+    let home4 = tempfile::tempdir().unwrap();
+    let master4 = setup(
+        home4.path(),
+        Some(r#"{ "薬草": { "種類": "回復", "値段": "10", "回復": 15 }, "壊れた行": "値段10", "銅の剣": { "種類": "武器", "値段": 40, "攻撃": "3" } }"#),
+    );
+    assert_eq!(load(&master4), 1, "loaduに失敗");
+    talk("OnBoot", "");
+    assert_eq!(
+        talk("OnShop", ""),
+        say(
+            "いらっしゃい。\\w9（所持金20ゴールド）",
+            "\\q[薬草（10G）,OnBuy,薬草]\\q[銅の剣（40G）,OnBuy,銅の剣]\\q[戻る,OnMenu]"
+        )
+    );
+    assert_eq!(talk("OnBuy", "薬草"), say("薬草を買った。\\w9（残り10ゴールド）", MENU));
+    assert!(send("OnTestGive", "銅の剣").contains("204 No Content"));
+    assert_eq!(talk("OnUse", "銅の剣"), say("銅の剣を装備した。\\w9攻撃力が6になった。", MENU));
+    minato::unload();
 }

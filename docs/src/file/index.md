@@ -73,6 +73,7 @@ OnBoot => {
 ```
 
 読み込みでは、`file_read` と `json_parse` のどちらが失敗しても空の辞書にしておきます。こうすると、後の処理が `null` を相手に警告を出し続けることがありません。
+JSONとして正しくても、中身がマップでなければ使えないので、`is_map` で確かめます（`is_map(null)` は `false` なので、読み込みの失敗もここでまとめて扱えます）。
 
 ```
 func dict_load() {
@@ -82,7 +83,7 @@ func dict_load() {
         return false
     }
     let data = json_parse(text)
-    if (is_null(data)) {
+    if (!is_map(data)) {
         global dict = {}
         return false
     }
@@ -100,6 +101,18 @@ func dict_save() {
         return false
     }
     return file_write("ghost/master/dict.json", text)
+}
+```
+
+分類の中身は `is_array` で確かめます。`dict.json` を手で書き間違えて `"挨拶": "やあ。"` のように配列でなくなっていても、空の分類として扱えば他の関数がそのまま動きます。
+
+```
+func dict_words(cat) {
+    let words = get(dict, cat, [])
+    if (!is_array(words)) {
+        return []
+    }
+    return words
 }
 ```
 
@@ -132,11 +145,28 @@ OnBoot => {
 OnShop => {
     うきわ君: いらっしゃい。
     foreach items as name, item {
-        \q[${name}（${item.値段}G）,OnBuy,${name}]
+        \q[${name}（${num_field(item, "値段")}G）,OnBuy,${name}]
     }
     \q[戻る,OnMenu]
 }
 ```
+
+表の数値は `num_field` で読みます。表を手で書いて `"値段": "10"` のように文字列にしてしまっても、`is_num` と `is_str` で確かめて数値に直します。
+
+```
+func num_field(row, key) {
+    let v = get(row, key, 0)
+    if (is_num(v)) {
+        return v
+    }
+    if (is_str(v)) {
+        return to_num(v)
+    }
+    return 0
+}
+```
+
+読み込みでは、表全体がマップでなければ空の表にし、マップでない行は読み飛ばします。くわしくはサンプルの `talks/rpg.mnt` を見てください。
 
 `\q[...]` だけの行でも、セリフと同じように `${...}` が展開されます。
 
