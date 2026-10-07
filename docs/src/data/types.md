@@ -68,6 +68,22 @@ let data = {"name": "湊", "age": 17}
 湊: ${save.未定義 ?? "初期値"}
 ```
 
+## 型の判定
+
+`is_num`・`is_str`・`is_bool`・`is_array`・`is_map`・`is_null` で値の型を確かめられます。
+`type_of(値)` は型の名前（`"number"`・`"string"` など）を返します。
+
+```
+// true
+湊: ${is_num(42)}
+// false（数字でも文字列）
+湊: ${is_num("42")}
+// array
+湊: ${type_of([1, 2])}
+```
+
+くわしくは[組み込み関数](../func/builtin.md#型の判定)を参照してください。
+
 ## 型の変換
 
 | 関数 | 意味 |

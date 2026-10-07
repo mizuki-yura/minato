@@ -75,7 +75,7 @@ YAYAの機能の対応は[付録A](yaya.md)にまとめています。主なも�
 | `EVAL`（文字列をコードとして実行） | ✕ | なし |
 | 名前空間（`A.B` のような関数名） | ✕ | トーク名や関数名に `.` は使えない |
 | 関数のオプション（`: nonoverlap` `: sequential` など） | △ | `nonoverlap` に当たる動きは、同名トークで常に働く。順番に出すなら自作（[6.](wordgroups.md)） |
-| 型の判定（`GETTYPE`、`ISINTEGER`） | △ | `is_null()`。数値かどうかは `regex_match` などで調べる |
+| 型の判定（`GETTYPE`、`ISINTEGER`） | ○ | `is_num()`・`is_str()`・`is_null()`・`type_of()` など |
 | ファイル操作（`FOPEN` `FREAD` `FWRITE` `FDEL` `FENUM` など） | △ | `file_read` `file_write` `file_append` `file_move` のみ。**1行ずつ読む処理、削除、フォルダの列挙はない** |
 | システム辞書（`yaya_shiori3.dic`）が提供する機能 | ✕ | `OnBoot` などは自分で書く |
 

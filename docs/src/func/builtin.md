@@ -144,7 +144,6 @@ OnBoot => {
 | 関数 | 説明 | 例 |
 |---|---|---|
 | `choose(cond, a, b)` | condが真なら`a`、偽なら`b`（選ばれなかった側の式は評価されません） | `choose(flag, "はい", "いいえ")` |
-| `is_null(v)` | `v` が `null` か | `is_null(save.名前)` → `true` |
 | `talk_exists(name)` | その名前のトークまたは関数が定義されているか | `talk_exists("挨拶")` → `true` |
 | `log(v, ...)` | 値をログに書き出す（戻り値は `null`） | `log("起動しました")` |
 
@@ -159,6 +158,31 @@ OnBoot => {
 | `saori(dll, arg0, arg1, ...)` | SAORIを呼び出す |
 
 `saori` の詳細は[SAORI連携](../saori/saori.md)を参照してください。
+
+## 型の判定
+
+| 関数 | 説明 | 例 |
+|---|---|---|
+| `is_num(v)` | `v` が数値か | `is_num(42)` → `true`、`is_num("42")` → `false` |
+| `is_str(v)` | `v` が文字列か | `is_str("42")` → `true` |
+| `is_bool(v)` | `v` が `true` / `false` か | `is_bool(false)` → `true` |
+| `is_array(v)` | `v` が配列か | `is_array([1, 2])` → `true` |
+| `is_map(v)` | `v` がマップか | `is_map({"a": 1})` → `true` |
+| `is_null(v)` | `v` が `null` か | `is_null(save.名前)` → `true` |
+| `type_of(v)` | 型の名前を返す（`"number"`・`"string"`・`"bool"`・`"array"`・`"map"`・`"null"` のどれか） | `type_of(3.14)` → `"number"` |
+
+- 調べるのは**今の値の型**だけです。`"42"` のような数字の文字列は文字列なので、`is_num("42")` は `false` です。
+- 未定義の変数は `null` になるので、`is_null(save.未定義)` は `true`、`type_of(save.未定義)` は `"null"` です。
+- 引数を省略すると `null` を渡したのと同じ扱いになります。
+
+JSONから読み込んだ値を使う前に確かめるときに便利です。
+
+```
+let data = json_parse(file_read("ghost/master/config.json"))
+if (is_num(data.回数)) {
+    湊: ${data.回数}回目です。
+}
+```
 
 ## JSON
 

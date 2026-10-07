@@ -585,7 +585,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "has_key", "keys", "values", "delete",
     "count", "sort", "reverse", "unique",
     "json_parse", "json_stringify",
-    "get_property", "choose", "days_since", "saori", "log" , "is_null","format","talk_exists","get", "days_between", 
+    "get_property", "choose", "days_since", "saori", "log" , "is_null",
+    "is_num", "is_str", "is_bool", "is_array", "is_map", "type_of",
+    "format","talk_exists","get", "days_between", 
         "file_read", "file_write", "file_append", "file_move",
 ];
 
@@ -726,6 +728,19 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
         "trim"   => Value::Str(vals.get(0).map(|v| v.to_display().trim().to_string()).unwrap_or_default()),
         "to_str" => Value::Str(vals.get(0).map(|v| v.to_display()).unwrap_or_default()),
         "to_num" => Value::Number(vals.get(0).map(|v| v.as_number()).unwrap_or(0.0)),
+        "is_num"   => Value::Bool(matches!(vals.get(0), Some(Value::Number(_)))),
+        "is_str"   => Value::Bool(matches!(vals.get(0), Some(Value::Str(_)))),
+        "is_bool"  => Value::Bool(matches!(vals.get(0), Some(Value::Bool(_)))),
+        "is_array" => Value::Bool(matches!(vals.get(0), Some(Value::Array(_)))),
+        "is_map"   => Value::Bool(matches!(vals.get(0), Some(Value::Map(_)))),
+        "type_of"  => Value::Str(match vals.get(0).unwrap_or(&Value::Null) {
+            Value::Number(_) => "number",
+            Value::Str(_)    => "string",
+            Value::Bool(_)   => "bool",
+            Value::Array(_)  => "array",
+            Value::Map(_)    => "map",
+            Value::Null      => "null",
+        }.to_string()),
         "to_lower" => Value::Str(vals.get(0).map(|v| v.to_display().to_lowercase()).unwrap_or_default()),
 "to_upper" => Value::Str(vals.get(0).map(|v| v.to_display().to_uppercase()).unwrap_or_default()),
         "chr" => {
@@ -4570,6 +4585,28 @@ OnRandomTalk if(false) => {
     湊: ${json_parse('{"a":[5,6]}').a[1]}
 }"#);
         assert_eq!(out, "\\06\\e");
+    }
+
+    // ── 型判定 ──────────────────────────────────────────────
+
+    #[test]
+    fn test_type_checks_on_json_values() {
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    let d = json_parse('{"n":42,"s":"42","b":true,"a":[1],"m":{},"z":null}')
+    湊: ${is_num(d.n)}${is_num(d.s)}${is_str(d.s)}${is_str(d.n)}${is_bool(d.b)}${is_array(d.a)}${is_map(d.m)}${is_map(d.a)}${is_null(d.z)}
+}"#);
+        assert_eq!(out, "\\0truefalsetruefalsetruetruetruefalsetrue\\e");
+        assert!(cg.errors.is_empty(), "{:?}", cg.errors);
+    }
+
+    #[test]
+    fn test_type_of() {
+        let mut cg = make_gen();
+        let out = run_in(&mut cg, r#"OnBoot => {
+    湊: ${type_of(1)},${type_of("a")},${type_of(false)},${type_of([1])},${type_of({"k": 1})},${type_of(null)},${type_of(save.未定義)}
+}"#);
+        assert_eq!(out, "\\0number,string,bool,array,map,null,null\\e");
     }
 
     // ── json_parse / json_stringify ──────────────────────────
