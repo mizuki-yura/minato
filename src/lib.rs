@@ -12,6 +12,8 @@ mod runtime;
 mod saori;
 pub mod analyzer;
 pub mod diagnostic;
+// CLI・GUIチェッカー共通の読み込み〜解析処理
+pub mod checker;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_long;

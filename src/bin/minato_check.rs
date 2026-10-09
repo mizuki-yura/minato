@@ -1,7 +1,7 @@
 // minato_check.rs
 // SSPなしで動くCLI構文チェッカー。
 // talks/main.mnt を直下に持つディレクトリ（ゴーストの ghost/master）を渡すと、
-// SSPに読み込ませずにparser::load_programとanalyzer::Analyzerを走らせ、
+// SSPに読み込ませずにchecker::check_ghost（パーサーと静的解析）を走らせ、
 // 構文エラー・静的解析結果（未定義call、ループ外break等）を表示する。
 // save.jsonの読み書きやSAORIのロードなど、実行系の副作用は発生させない。
 //
@@ -10,94 +10,15 @@
 //
 // ビルド: cargo build --features cli --bin minato_check
 
-use std::collections::{HashMap, HashSet};
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
-use minato::analyzer::Analyzer;
-use minato::diagnostic::{location, render_header, sort_diagnostics, Diagnostic, Level};
-use minato::parser::{load_program, AssignOp, Expr, LoadError, PathSegment, Spanned, Stmt, Talk};
+use minato::checker::{check_ghost, SourceFiles};
+use minato::diagnostic::{location, render_header, Diagnostic, Level};
 
 const USAGE: &str = "使い方: minato_check [--no-color] <ghost/masterのディレクトリ（talks/main.mnt を含むディレクトリ）>";
-
-type LoadResult = Result<
-    (
-        Vec<Talk>,
-        Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>,
-        Vec<(Vec<PathSegment>, AssignOp, Expr)>,
-    ),
-    LoadError,
->;
-
-/// chumskyの再帰下降パーサーは実サイズのmain.mntだと既定のスレッドスタック
-/// （Windowsのメインスレッドは通常1MB程度）では足りずオーバーフローすることが
-/// あるため、SSP向けDLL側のload_program_guardedと同様に大きいスタックを
-/// 持つ別スレッドで実行する。
-fn run_load_program(main_mnt: &Path) -> LoadResult {
-    let main_mnt = main_mnt.to_path_buf();
-    let spawned = std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024) // 16MB
-        .spawn(move || {
-            let mut visited = HashSet::new();
-            load_program(&main_mnt, &mut visited)
-        });
-
-    match spawned {
-        Ok(handle) => match handle.join() {
-            Ok(result) => result,
-            Err(_) => Err(LoadError::PreprocessError(Diagnostic::error(
-                "パース処理中に予期しないエラー（パニック）が発生しました",
-            ))),
-        },
-        Err(e) => Err(LoadError::PreprocessError(Diagnostic::error(format!(
-            "パース処理を開始できませんでした: {}",
-            e
-        )))),
-    }
-}
-
-// ── 表示 ─────────────────────────────────────────────────
-
-/// 診断のファイル名から本文を引くためのキャッシュ。
-/// Diagnostic.fileはファイル名だけなので、talks配下から同じ名前のファイルを探して読み直す。
-/// 見つからない・同名が複数ある・読めない場合はNone（抜粋なしで表示する）。
-struct SourceFiles {
-    talks_dir: PathBuf,
-    cache: HashMap<String, Option<String>>,
-}
-
-impl SourceFiles {
-    fn new(talks_dir: PathBuf) -> Self {
-        Self { talks_dir, cache: HashMap::new() }
-    }
-
-    fn get(&mut self, file: &str) -> Option<&str> {
-        if !self.cache.contains_key(file) {
-            let mut found = Vec::new();
-            find_files_named(&self.talks_dir, file, &mut found);
-            let text = match found.as_slice() {
-                [only] => std::fs::read_to_string(only).ok(),
-                _ => None,
-            };
-            self.cache.insert(file.to_string(), text);
-        }
-        self.cache.get(file).and_then(|t| t.as_deref())
-    }
-}
-
-fn find_files_named(dir: &Path, name: &str, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            find_files_named(&path, name, out);
-        } else if path.file_name().is_some_and(|n| n == name) {
-            out.push(path);
-        }
-    }
-}
 
 /// (行, 桁)（どちらも1-indexed、桁は文字単位）を、本文全体の先頭からの文字オフセットにする。
 /// ariadneはIndexType::Charで本文全体を文字単位で数えるので、\rも1文字として数える。
@@ -228,46 +149,17 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     };
 
-    let talks_dir = ghost_dir.join("talks");
-    let main_mnt = talks_dir.join("main.mnt");
-    let mut sources = SourceFiles::new(talks_dir);
+    let mut sources = SourceFiles::new(ghost_dir.join("talks"));
+    let result = check_ghost(&ghost_dir);
 
-    let (all_talks, all_funcs, _all_globals) = match run_load_program(&main_mnt) {
-        Ok(r) => r,
-        Err(LoadError::PreprocessError(d)) => {
-            print_all(&[d], &mut sources, color);
-            return ExitCode::from(1);
-        }
-        Err(LoadError::ParseError(mut diags, _path)) => {
-            sort_diagnostics(&mut diags);
-            print_all(&diags, &mut sources, color);
-            return ExitCode::from(1);
-        }
-    };
-
-    // func_namesを先に作る（all_funcsをムーブする前に）
-    let func_names: HashSet<String> = all_funcs
-        .iter()
-        .map(|(name, _, _)| name.clone())
-        .collect();
-
-    let mut talks: HashMap<String, Vec<Talk>> = HashMap::new();
-    for talk in all_talks {
-        talks.entry(talk.event.clone()).or_default().push(talk);
-    }
-    let talk_names: HashSet<String> = talks.keys().cloned().collect();
-
-    let mut analyze_errors = Analyzer::new(talk_names, func_names).analyze(&talks, &all_funcs);
-
-    if analyze_errors.is_empty() {
+    if result.diagnostics.is_empty() {
         println!("構文・静的解析ともに問題ありませんでした");
         return ExitCode::from(0);
     }
 
-    sort_diagnostics(&mut analyze_errors);
-    print_all(&analyze_errors, &mut sources, color);
+    print_all(&result.diagnostics, &mut sources, color);
 
-    if analyze_errors.iter().any(|e| e.level == Level::Error) {
+    if result.has_error() {
         ExitCode::from(1)
     } else {
         ExitCode::from(0)
