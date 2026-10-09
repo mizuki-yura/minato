@@ -8,6 +8,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, RichText};
@@ -79,6 +80,8 @@ enum Outcome {
     Empty,
     /// 選ばれたが、まだチェックしていない
     Ready,
+    /// チェック中。結果は別スレッドから届く
+    Checking(Receiver<Outcome>),
     /// talks/main.mnt が見つからなかった
     NotFound,
     Checked { master: PathBuf, result: CheckResult },
@@ -86,7 +89,10 @@ enum Outcome {
 
 /// 画面の状態。前回開いたフォルダの記憶などを足すときはここに持たせる。
 struct App {
+    ctx: egui::Context,
     font_ok: bool,
+    /// 開いているファイル・フォルダ選択画面の結果の受け取り口（開いていなければNone）
+    dialog: Option<Receiver<Option<PathBuf>>>,
     target: Option<PathBuf>,
     outcome: Outcome,
 }
@@ -94,7 +100,7 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let font_ok = install_japanese_font(&cc.egui_ctx);
-        let mut app = Self { font_ok, target: None, outcome: Outcome::Empty };
+        let mut app = Self { ctx: cc.egui_ctx.clone(), font_ok, dialog: None, target: None, outcome: Outcome::Empty };
         // exeのアイコンにフォルダをドロップして起動したときは、それをすぐチェックする
         if let Some(arg) = std::env::args_os().nth(1) {
             app.select(PathBuf::from(arg), true);
@@ -110,15 +116,64 @@ impl App {
         }
     }
 
+    /// 大きいゴーストだと数秒かかるため、窓が固まらないよう別スレッドでチェックする。
+    /// チェック中に別のフォルダが選ばれたら、古い結果は受け取り手がいなくなり捨てられる。
     fn run_check(&mut self) {
-        let Some(target) = &self.target else { return };
-        self.outcome = match resolve_master_dir(target) {
-            Some(master) => {
-                let result = check_ghost(&master);
-                Outcome::Checked { master, result }
+        let Some(target) = self.target.clone() else { return };
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let outcome = match resolve_master_dir(&target) {
+                Some(master) => {
+                    let result = check_ghost(&master);
+                    Outcome::Checked { master, result }
+                }
+                None => Outcome::NotFound,
+            };
+            let _ = tx.send(outcome);
+            ctx.request_repaint();
+        });
+        self.outcome = Outcome::Checking(rx);
+    }
+
+    /// 選択画面を別スレッドで開く。初回はWindowsがエクスプローラーの部品を読み込むため時間がかかり、
+    /// UIのスレッドで開くとその間この窓が止まって「応答待ち」のカーソルが出てしまう。
+    fn open_dialog(&mut self, pick: impl FnOnce() -> Option<PathBuf> + Send + 'static) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(pick());
+            ctx.request_repaint();
+        });
+        self.dialog = Some(rx);
+    }
+
+    /// 選択画面が閉じていたら、選ばれたものをチェックする。
+    fn poll_dialog(&mut self) {
+        let Some(rx) = &self.dialog else { return };
+        match rx.try_recv() {
+            Ok(picked) => {
+                self.dialog = None;
+                if let Some(p) = picked {
+                    self.select(p, true);
+                }
             }
-            None => Outcome::NotFound,
-        };
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.dialog = None,
+        }
+    }
+
+    /// 別スレッドのチェックが終わっていたら結果を受け取る。
+    fn poll_check(&mut self) {
+        if let Outcome::Checking(rx) = &self.outcome {
+            match rx.try_recv() {
+                Ok(outcome) => self.outcome = outcome,
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.outcome = Outcome::Ready;
+                }
+            }
+        }
     }
 }
 
@@ -165,6 +220,10 @@ fn display_path(p: &Path) -> String {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_dialog();
+        self.poll_check();
+        let dialog_open = self.dialog.is_some();
+        let checking = matches!(self.outcome, Outcome::Checking(_));
         // ドロップされたら、そのまま1回チェックする
         let dropped: Option<PathBuf> =
             ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone()));
@@ -200,20 +259,20 @@ impl eframe::App for App {
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("フォルダを選ぶ").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                        self.select(p, true);
-                    }
+                if ui.add_enabled(!dialog_open, egui::Button::new("フォルダを選ぶ")).clicked() {
+                    self.open_dialog(|| rfd::FileDialog::new().pick_folder());
                 }
-                if ui.button("ファイルを選ぶ").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("湊スクリプト", &["mnt"]).pick_file() {
-                        self.select(p, true);
-                    }
+                if ui.add_enabled(!dialog_open, egui::Button::new("ファイルを選ぶ")).clicked() {
+                    self.open_dialog(|| rfd::FileDialog::new().add_filter("湊スクリプト", &["mnt"]).pick_file());
+                }
+                if dialog_open {
+                    ui.spinner();
+                    ui.label("選択画面を開いています…");
                 }
                 ui.separator();
                 let label = if matches!(self.outcome, Outcome::Checked { .. } | Outcome::NotFound) { "再チェック" } else { "チェック" };
                 let button = egui::Button::new(RichText::new(label).strong());
-                if ui.add_enabled(self.target.is_some(), button).clicked() {
+                if ui.add_enabled(self.target.is_some() && !checking, button).clicked() {
                     self.run_check();
                 }
             });
@@ -223,6 +282,14 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| match &self.outcome {
             Outcome::Empty => {
                 ui.centered_and_justified(|ui| ui.weak("まだチェックしていません"));
+            }
+            Outcome::Checking(_) => {
+                ui.centered_and_justified(|ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new("チェック中…").size(18.0));
+                    });
+                });
             }
             Outcome::Ready => {
                 ui.centered_and_justified(|ui| ui.weak("「チェック」を押してください"));
