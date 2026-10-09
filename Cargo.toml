@@ -6,6 +6,11 @@ license = "MIT"
 
 # SSP向けDLLとして出力
 # rlibはsrc/bin配下のCLIツールやtests/配下の結合テストからlibをuseするために必要
+# GUI構文チェッカー（minato-checker-gui）を同じワークスペースに置く。
+# 本体（ルートのminato）のビルド内容は変わらない
+[workspace]
+members = [".", "minato-checker-gui"]
+
 [lib]
 name = "minato"
 crate-type = ["cdylib", "rlib"]

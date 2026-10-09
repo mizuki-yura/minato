@@ -1,0 +1,21 @@
+[package]
+name = "minato-checker-gui"
+version = "0.1.5"
+edition = "2021"
+license = "MIT"
+description = "湊（minato）のGUI構文チェッカー"
+
+[[bin]]
+name = "minato_check_gui"
+path = "src/main.rs"
+
+[dependencies]
+# パーサー・静的解析・エラー文言はCLIと共通のものを使う
+minato = { path = ".." }
+eframe = "0.32"
+rfd = "0.15"
+
+[build-dependencies]
+# MSVCのランタイム（VCRUNTIME140.dll）をこのexeにだけ静的リンクし、単体で配れるようにする。
+# .cargo/config.toml の crt-static はワークスペース全体（SSP向けDLL）にも効いてしまうため使わない
+static_vcruntime = "2"
