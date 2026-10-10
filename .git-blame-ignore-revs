@@ -1,0 +1,7 @@
+# git blame で無視する、改行コードだけを変えたコミット
+# 使い方: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# 改行コードをLFに戻す
+8dd3c7aa32f8381ec3b5cd4e7ef16acba0945088
+# 改行コードをLFにそろえ、.gitattributesを追加する
+e489e2149d7f9d49299df7e91fc691884e9d3c1f
