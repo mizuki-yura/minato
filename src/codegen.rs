@@ -587,13 +587,94 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "json_parse", "json_stringify",
     "get_property", "choose", "days_since", "saori", "log" , "is_null",
     "is_num", "is_str", "is_bool", "is_array", "is_map", "type_of",
-    "format","talk_exists","get", "days_between", 
+    "format","talk_exists","get", "days_between",
+    "to_hankaku", "to_zenkaku",
+    "pow", "sign", "exp", "ln", "log10", "sum",
         "file_read", "file_write", "file_append", "file_move",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
     BUILTIN_NAMES.contains(&name)
 }
+// ── 全角⇔半角変換 ────────────────────────────────────────
+
+/// 半角カナ（U+FF66〜U+FF9D）と全角カタカナの対応表（清音）。
+const HANKAKU_KANA: &str = "ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ";
+const ZENKAKU_KANA: &str = "ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン";
+/// 半角に対応のある全角約物（。「」、・゛゜）
+const HANKAKU_PUNCT: &str = "｡｢｣､･ﾞﾟ";
+const ZENKAKU_PUNCT: &str = "。「」、・゛゜";
+/// 濁点・半濁点付きの全角カナ（Unicode上で清音の+1 / +2 に並んでいる）
+const DAKUON: &str = "ガギグゲゴザジズゼゾダヂヅデドバビブベボ";
+const HANDAKUON: &str = "パピプペポ";
+
+fn kana_pos(table: &str, c: char) -> Option<usize> {
+    table.chars().position(|t| t == c)
+}
+
+fn kana_at(table: &str, i: usize) -> char {
+    table.chars().nth(i).unwrap()
+}
+
+fn push_hankaku_kana(out: &mut String, z: char) {
+    out.push(kana_at(HANKAKU_KANA, kana_pos(ZENKAKU_KANA, z).unwrap()));
+}
+
+/// 全角→半角（英数字・ASCII記号・スペース・カタカナ）。濁点・半濁点は分解する。
+pub fn to_hankaku(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if ('\u{FF01}'..='\u{FF5E}').contains(&c) {
+            out.push(char::from_u32(c as u32 - 0xFEE0).unwrap());
+        } else if c == '\u{3000}' {
+            out.push(' ');
+        } else if c == 'ヴ' {
+            out.push_str("ｳﾞ");
+        } else if DAKUON.contains(c) {
+            push_hankaku_kana(&mut out, char::from_u32(c as u32 - 1).unwrap());
+            out.push('ﾞ');
+        } else if HANDAKUON.contains(c) {
+            push_hankaku_kana(&mut out, char::from_u32(c as u32 - 2).unwrap());
+            out.push('ﾟ');
+        } else if let Some(i) = kana_pos(ZENKAKU_KANA, c) {
+            out.push(kana_at(HANKAKU_KANA, i));
+        } else if let Some(i) = kana_pos(ZENKAKU_PUNCT, c) {
+            out.push(kana_at(HANKAKU_PUNCT, i));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// 半角→全角（英数字・ASCII記号・スペース・カタカナ）。濁点・半濁点は合成する。
+pub fn to_zenkaku(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if ('!'..='~').contains(&c) {
+            out.push(char::from_u32(c as u32 + 0xFEE0).unwrap());
+        } else if c == ' ' {
+            out.push('\u{3000}');
+        } else if let Some(i) = kana_pos(HANKAKU_KANA, c) {
+            let z = kana_at(ZENKAKU_KANA, i);
+            let daku = char::from_u32(z as u32 + 1).filter(|d| DAKUON.contains(*d));
+            let handaku = char::from_u32(z as u32 + 2).filter(|d| HANDAKUON.contains(*d));
+            match (it.peek(), daku, handaku) {
+                (Some('ﾞ'), _, _) if z == 'ウ' => { it.next(); out.push('ヴ'); }
+                (Some('ﾞ'), Some(d), _) => { it.next(); out.push(d); }
+                (Some('ﾟ'), _, Some(h)) => { it.next(); out.push(h); }
+                _ => out.push(z),
+            }
+        } else if let Some(i) = kana_pos(HANKAKU_PUNCT, c) {
+            out.push(kana_at(ZENKAKU_PUNCT, i));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 // ── ビルトイン関数 ────────────────────────────────────────
 
 fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
@@ -602,7 +683,17 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
         "ceil"  => Value::Number(vals.get(0).map(|v| v.as_number().ceil()).unwrap_or(0.0)),
         "round" => Value::Number(vals.get(0).map(|v| v.as_number().round()).unwrap_or(0.0)),
         "trunc" => Value::Number(vals.get(0).map(|v| v.as_number().trunc()).unwrap_or(0.0)),
-        "rand"  => Value::Number(simple_rand() as f64),
+        "rand"  => match (vals.get(0), vals.get(1)) {
+            // rand(lo, hi): lo以上hi以下（両端を含む）。lo > hi なら入れ替える
+            (Some(a), Some(b)) => {
+                let (mut lo, mut hi) = (a.as_number().round() as i64, b.as_number().round() as i64);
+                if lo > hi { std::mem::swap(&mut lo, &mut hi); }
+                let span = (hi as i128 - lo as i128 + 1) as u128;
+                let r = ((simple_rand() as u128) << 32 | simple_rand() as u128) % span;
+                Value::Number((lo as i128 + r as i128) as f64)
+            }
+            _ => Value::Number(simple_rand() as f64),
+        },
         "len" => match vals.get(0) {
             Some(Value::Str(s))   => Value::Number(s.chars().count() as f64),
             Some(Value::Array(a)) => Value::Number(a.len() as f64),
@@ -611,11 +702,13 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
         },
         "abs" => Value::Number(vals.get(0).map(|v| v.as_number().abs()).unwrap_or(0.0)),
         "min" => match (vals.get(0), vals.get(1)) {
+            (Some(Value::Array(arr)), None) => arr.iter().map(|v| v.as_number()).reduce(f64::min).map(Value::Number).unwrap_or(Value::Null),
             (Some(a), Some(b)) => Value::Number(a.as_number().min(b.as_number())),
             (Some(a), None)    => Value::Number(a.as_number()),
             _                  => Value::Null,
         },
         "max" => match (vals.get(0), vals.get(1)) {
+            (Some(Value::Array(arr)), None) => arr.iter().map(|v| v.as_number()).reduce(f64::max).map(Value::Number).unwrap_or(Value::Null),
             (Some(a), Some(b)) => Value::Number(a.as_number().max(b.as_number())),
             (Some(a), None)    => Value::Number(a.as_number()),
             _                  => Value::Null,
@@ -632,6 +725,29 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
         "acos"  => Value::Number(vals.get(0).map(|v| v.as_number().acos()).unwrap_or(0.0)),
         "atan2" => match (vals.get(0), vals.get(1)) {
             (Some(y), Some(x)) => Value::Number(y.as_number().atan2(x.as_number())),
+            _ => Value::Number(0.0),
+        },
+        "pow" => match (vals.get(0), vals.get(1)) {
+            (Some(a), Some(b)) => Value::Number(a.as_number().powf(b.as_number())),
+            _ => Value::Null,
+        },
+        "sign" => Value::Number(match vals.get(0).map(|v| v.as_number()).unwrap_or(0.0) {
+            n if n > 0.0 => 1.0,
+            n if n < 0.0 => -1.0,
+            _ => 0.0,
+        }),
+        "exp"   => Value::Number(vals.get(0).map(|v| v.as_number().exp()).unwrap_or(1.0)),
+        // 0以下（とNaN）はNaNを返さず null にする
+        "ln"    => match vals.get(0).map(|v| v.as_number()) {
+            Some(n) if n > 0.0 => Value::Number(n.ln()),
+            _ => Value::Null,
+        },
+        "log10" => match vals.get(0).map(|v| v.as_number()) {
+            Some(n) if n > 0.0 => Value::Number(n.log10()),
+            _ => Value::Null,
+        },
+        "sum" => match vals.get(0) {
+            Some(Value::Array(arr)) => Value::Number(arr.iter().map(|v| v.as_number()).sum()),
             _ => Value::Number(0.0),
         },
         "sqrt"   => Value::Number(vals.get(0).map(|v| v.as_number().sqrt()).unwrap_or(0.0)),
@@ -743,6 +859,8 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
         }.to_string()),
         "to_lower" => Value::Str(vals.get(0).map(|v| v.to_display().to_lowercase()).unwrap_or_default()),
 "to_upper" => Value::Str(vals.get(0).map(|v| v.to_display().to_uppercase()).unwrap_or_default()),
+        "to_hankaku" => Value::Str(vals.get(0).map(|v| to_hankaku(&v.to_display())).unwrap_or_default()),
+        "to_zenkaku" => Value::Str(vals.get(0).map(|v| to_zenkaku(&v.to_display())).unwrap_or_default()),
         "chr" => {
             let n = vals.get(0).map(|v| v.as_number() as u32).unwrap_or(0);
             match char::from_u32(n) {
@@ -5182,3 +5300,110 @@ mod set_path_tests {
 }  // ← set_path_testsの閉じ括弧はこの後
 
 
+
+#[cfg(test)]
+mod builtin_ext_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn call(name: &str, vals: Vec<Value>) -> Value {
+        let gen = Codegen::new(HashMap::new(), HashMap::new(), PathBuf::from("."));
+        call_builtin(name, vals, &gen.env)
+    }
+    fn s(v: &str) -> Value { Value::Str(v.to_string()) }
+    fn n(v: f64) -> Value { Value::Number(v) }
+    fn arr(v: &[f64]) -> Value { Value::Array(v.iter().map(|x| n(*x)).collect()) }
+    fn num(v: Value) -> f64 { match v { Value::Number(x) => x, other => panic!("数値でない: {:?}", other.to_display()) } }
+
+    #[test]
+    fn test_to_hankaku_alnum_symbol_space() {
+        assert_eq!(to_hankaku("ＡＢＣ１２３"), "ABC123");
+        assert_eq!(to_hankaku("！？＃　ｚ"), "!?# z");
+        assert_eq!(to_hankaku("漢字ひらがな"), "漢字ひらがな");
+    }
+
+    #[test]
+    fn test_to_hankaku_kana_decomposes_dakuten() {
+        assert_eq!(to_hankaku("カナ"), "ｶﾅ");
+        assert_eq!(to_hankaku("ガギパポヴ"), "ｶﾞｷﾞﾊﾟﾎﾟｳﾞ");
+        assert_eq!(to_hankaku("ヴァイオリン。"), "ｳﾞｧｲｵﾘﾝ｡");
+    }
+
+    #[test]
+    fn test_to_zenkaku_composes_dakuten() {
+        assert_eq!(to_zenkaku("ｶﾞｷﾞ abc"), "ガギ　ａｂｃ");
+        assert_eq!(to_zenkaku("ﾊﾟﾋﾟｳﾞ"), "パピヴ");
+        // 濁点が付かない字の後ろの濁点は単独の゛にする
+        assert_eq!(to_zenkaku("ｱﾞﾏﾟ"), "ア゛マ゜");
+        assert_eq!(to_zenkaku("ｶﾅ123"), "カナ１２３");
+        assert_eq!(to_zenkaku("漢字"), "漢字");
+    }
+
+    #[test]
+    fn test_zenkaku_hankaku_roundtrip() {
+        let z = "ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴ";
+        assert_eq!(to_zenkaku(&to_hankaku(z)), z);
+    }
+
+    #[test]
+    fn test_to_hankaku_builtin_non_string() {
+        assert_eq!(call("to_hankaku", vec![s("１２３")]).to_display(), "123");
+        assert_eq!(num(call("to_num", vec![call("to_hankaku", vec![s("１２３")])])), 123.0);
+        assert_eq!(call("to_hankaku", vec![n(12.0)]).to_display(), "12");
+        assert_eq!(call("to_zenkaku", vec![]).to_display(), "");
+    }
+
+    #[test]
+    fn test_pow_sign_exp() {
+        assert_eq!(num(call("pow", vec![n(2.0), n(10.0)])), 1024.0);
+        assert_eq!(num(call("sign", vec![n(-3.5)])), -1.0);
+        assert_eq!(num(call("sign", vec![n(0.0)])), 0.0);
+        assert_eq!(num(call("sign", vec![n(7.0)])), 1.0);
+        assert!((num(call("exp", vec![n(1.0)])) - std::f64::consts::E).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ln_log10() {
+        assert!((num(call("ln", vec![n(std::f64::consts::E)])) - 1.0).abs() < 1e-12);
+        assert_eq!(num(call("log10", vec![n(1000.0)])), 3.0);
+        for name in ["ln", "log10"] {
+            assert!(matches!(call(name, vec![n(0.0)]), Value::Null));
+            assert!(matches!(call(name, vec![n(-1.0)]), Value::Null));
+            assert!(matches!(call(name, vec![]), Value::Null));
+        }
+    }
+
+    #[test]
+    fn test_sum() {
+        assert_eq!(num(call("sum", vec![arr(&[1.0, 2.5, 3.0])])), 6.5);
+        assert_eq!(num(call("sum", vec![arr(&[])])), 0.0);
+    }
+
+    #[test]
+    fn test_min_max_two_args_and_array() {
+        assert_eq!(num(call("min", vec![n(3.0), n(5.0)])), 3.0);
+        assert_eq!(num(call("max", vec![n(3.0), n(5.0)])), 5.0);
+        assert_eq!(num(call("min", vec![n(4.0)])), 4.0);
+        assert_eq!(num(call("min", vec![arr(&[4.0, -2.0, 9.0])])), -2.0);
+        assert_eq!(num(call("max", vec![arr(&[4.0, -2.0, 9.0])])), 9.0);
+        assert!(matches!(call("min", vec![arr(&[])]), Value::Null));
+        assert!(matches!(call("max", vec![arr(&[])]), Value::Null));
+    }
+
+    #[test]
+    fn test_rand_range_inclusive() {
+        let mut seen = [false; 3];
+        for _ in 0..5000 {
+            let v = num(call("rand", vec![n(1.0), n(3.0)]));
+            assert!((1.0..=3.0).contains(&v) && v.fract() == 0.0, "範囲外: {}", v);
+            seen[v as usize - 1] = true;
+        }
+        assert!(seen.iter().all(|b| *b), "両端を含む全値が出ていない");
+        for _ in 0..2000 {
+            let v = num(call("rand", vec![n(5.0), n(-5.0)]));
+            assert!((-5.0..=5.0).contains(&v), "入れ替え時に範囲外: {}", v);
+        }
+        assert_eq!(num(call("rand", vec![n(7.0), n(7.0)])), 7.0);
+        assert!(num(call("rand", vec![])) >= 0.0);
+    }
+}
