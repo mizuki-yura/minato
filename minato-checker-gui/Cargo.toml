@@ -12,8 +12,16 @@ path = "src/main.rs"
 [dependencies]
 # パーサー・静的解析・エラー文言はCLIと共通のものを使う
 minato = { path = ".." }
-eframe = "0.32"
+# persistence: 前回選んだフォルダを覚えておくため
+eframe = { version = "0.32", features = ["persistence"] }
 rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+# shell_warmup.rs: 起動時にシェルを先に読み込み、選択画面の初回表示を速くする
+# win_drop.rs: ドロップをWM_DROPFILESで受け取る
+winapi = { version = "0.3", features = ["combaseapi", "objbase", "knownfolders", "shlobj", "shobjidl", "shobjidl_core", "winerror", "wtypesbase", "commctrl", "shellapi", "winuser", "basetsd", "minwindef", "windef"] }
+# eframeの窓からHWNDを取り出す（eframeと同じ0.6系）
+raw-window-handle = "0.6"
 
 [build-dependencies]
 # MSVCのランタイム（VCRUNTIME140.dll）をこのexeにだけ静的リンクし、単体で配れるようにする。

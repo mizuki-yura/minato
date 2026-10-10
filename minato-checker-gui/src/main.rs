@@ -7,6 +7,10 @@
 // Windowsでダブルクリック起動したときにコンソール窓を出さない（他のOSでは無視される）
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod shell_warmup;
+#[cfg(windows)]
+mod win_drop;
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -15,17 +19,22 @@ use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, RichTex
 use minato::checker::{check_ghost, resolve_master_dir, CheckResult};
 use minato::diagnostic::{Diagnostic, Level};
 
+/// 前回選んだフォルダを保存するキー（eframeの設定ファイルに入る）
+const LAST_DIR_KEY: &str = "last_dir";
+
 const GUIDE: &str = "ゴーストのフォルダ（または .mnt ファイル）を、この窓にドラッグ＆ドロップしてください。\n\
 ドロップできないときは「フォルダを選ぶ」「ファイルを選ぶ」ボタンから選べます。\n\
 書いたトークに書き間違いがないかを、SSPを起動せずに確かめられます。";
 
 fn main() -> eframe::Result {
+    shell_warmup::spawn();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("湊 構文チェッカー")
             .with_inner_size([760.0, 560.0])
             .with_min_inner_size([480.0, 360.0])
-            .with_drag_and_drop(true),
+            // Windowsではwinitのドロップを使わず、win_dropで受け取る（理由はwin_drop.rs）
+            .with_drag_and_drop(!cfg!(windows)),
         ..Default::default()
     };
     eframe::run_native(
@@ -87,10 +96,14 @@ enum Outcome {
     Checked { master: PathBuf, result: CheckResult },
 }
 
-/// 画面の状態。前回開いたフォルダの記憶などを足すときはここに持たせる。
+/// 画面の状態。
 struct App {
     ctx: egui::Context,
+    /// 前回選んだフォルダ。選択画面はここから開く
+    last_dir: Option<PathBuf>,
     font_ok: bool,
+    /// Windowsでドロップされたパスの受け取り口（win_drop）
+    dropped: Option<Receiver<PathBuf>>,
     /// 開いているファイル・フォルダ選択画面の結果の受け取り口（開いていなければNone）
     dialog: Option<Receiver<Option<PathBuf>>>,
     target: Option<PathBuf>,
@@ -100,7 +113,23 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let font_ok = install_japanese_font(&cc.egui_ctx);
-        let mut app = Self { ctx: cc.egui_ctx.clone(), font_ok, dialog: None, target: None, outcome: Outcome::Empty };
+        let last_dir = cc
+            .storage
+            .and_then(|s| s.get_string(LAST_DIR_KEY))
+            .map(PathBuf::from);
+        let mut app = Self {
+            ctx: cc.egui_ctx.clone(),
+            last_dir,
+            font_ok,
+            dropped: None,
+            dialog: None,
+            target: None,
+            outcome: Outcome::Empty,
+        };
+        #[cfg(windows)]
+        {
+            app.dropped = win_drop::install(cc, &cc.egui_ctx);
+        }
         // exeのアイコンにフォルダをドロップして起動したときは、それをすぐチェックする
         if let Some(arg) = std::env::args_os().nth(1) {
             app.select(PathBuf::from(arg), true);
@@ -109,6 +138,11 @@ impl App {
     }
 
     fn select(&mut self, path: PathBuf, run_now: bool) {
+        // .mntが選ばれたときはそれがあるフォルダを覚える
+        let dir = if path.is_file() { path.parent().map(Path::to_path_buf) } else { Some(path.clone()) };
+        if dir.is_some() {
+            self.last_dir = dir;
+        }
         self.target = Some(path);
         self.outcome = Outcome::Ready;
         if run_now {
@@ -138,11 +172,16 @@ impl App {
 
     /// 選択画面を別スレッドで開く。初回はWindowsがエクスプローラーの部品を読み込むため時間がかかり、
     /// UIのスレッドで開くとその間この窓が止まって「応答待ち」のカーソルが出てしまう。
-    fn open_dialog(&mut self, pick: impl FnOnce() -> Option<PathBuf> + Send + 'static) {
+    fn open_dialog(&mut self, pick: impl FnOnce(rfd::FileDialog) -> Option<PathBuf> + Send + 'static) {
+        let mut dialog = rfd::FileDialog::new();
+        // 前回のフォルダが消えていたら、Windowsの既定の場所から開く
+        if let Some(dir) = self.last_dir.as_ref().filter(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(pick());
+            let _ = tx.send(pick(dialog));
             ctx.request_repaint();
         });
         self.dialog = Some(rx);
@@ -219,14 +258,22 @@ fn display_path(p: &Path) -> String {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Some(dir) = &self.last_dir {
+            storage.set_string(LAST_DIR_KEY, dir.to_string_lossy().into_owned());
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_dialog();
         self.poll_check();
         let dialog_open = self.dialog.is_some();
         let checking = matches!(self.outcome, Outcome::Checking(_));
         // ドロップされたら、そのまま1回チェックする
-        let dropped: Option<PathBuf> =
-            ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone()));
+        let dropped: Option<PathBuf> = match &self.dropped {
+            Some(rx) => rx.try_iter().last(),
+            None => ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())),
+        };
         if let Some(path) = dropped {
             self.select(path, true);
         }
@@ -260,10 +307,10 @@ impl eframe::App for App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.add_enabled(!dialog_open, egui::Button::new("フォルダを選ぶ")).clicked() {
-                    self.open_dialog(|| rfd::FileDialog::new().pick_folder());
+                    self.open_dialog(|d| d.pick_folder());
                 }
                 if ui.add_enabled(!dialog_open, egui::Button::new("ファイルを選ぶ")).clicked() {
-                    self.open_dialog(|| rfd::FileDialog::new().add_filter("湊スクリプト", &["mnt"]).pick_file());
+                    self.open_dialog(|d| d.add_filter("湊スクリプト", &["mnt"]).pick_file());
                 }
                 if dialog_open {
                     ui.spinner();
