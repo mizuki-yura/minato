@@ -1639,13 +1639,32 @@ pub fn program_with_include<'a>() -> impl Parser<'a, &'a str, Vec<ProgramItem>, 
         )
         .to(None);
 
+    // トップレベルの let は文法上書けない。汎用の回復に任せると原因の
+    // 分からないエラーになるので、ここで専用のエラーを出し、続く行
+    // （複数行のリテラルを含む）を次の項目の開始まで読み飛ばす。
+    let rest_of_item = none_of('\n').repeated()
+        .then(
+            just('\n')
+                .ignore_then(line.filter(move |s: &&str| !is_item_start(s)))
+                .repeated()
+        );
+    let top_let = keyword("let")
+        .validate(|_, e, emitter| {
+            emitter.emit(Rich::custom(
+                e.span(),
+                "let はトークや関数の中でしか使えません。トーク全体で共有したい値は global を使ってください".to_string(),
+            ));
+        })
+        .then(rest_of_item)
+        .to(None);
+
     ws_nl()
         .ignore_then(
-            include_directive()
+            top_let.or(include_directive()
                 .or(top_global)
                 .or(top_func)
                 .or(talk().map(ProgramItem::Talk))
-                .map(Some)
+                .map(Some))
                 .recover_with(via_parser(skip_item))
         )
         .repeated()
@@ -2285,4 +2304,20 @@ fn test_unclosed_interpolation_is_still_error() {
     let src = "OnBoot => {\n    湊: ${abc\n}";
     let pre = preprocess(src).expect("preprocess failed");
     assert!(program_with_include().parse(&*pre.src).into_result().is_err());
+}
+
+#[test]
+fn test_top_level_let_reports_dedicated_error() {
+    // トップレベルの let は仕様上書けない。複数行のマップでも1行でも、
+    // 「予期しないファイル末尾」ではなく let 専用のエラーを出すこと
+    for src in [
+        "let 一覧 = {\n    \"a\": [1, 2],\n    \"b\": [3, 4]\n}\nOnBoot => {\n    湊: あ\n}\n",
+        "let x = 1\nOnBoot => {\n    湊: あ\n}\n",
+    ] {
+        let errs = program_with_include().parse(src).into_result().expect_err("トップレベルletが通ってしまった");
+        assert_eq!(errs.len(), 1, "{:?}", errs);
+        let (msg, _) = reason_to_japanese(errs[0].reason());
+        assert!(msg.contains("let はトークや関数の中でしか使えません"), "{}", msg);
+        assert_eq!(errs[0].span().start, 0);
+    }
 }
