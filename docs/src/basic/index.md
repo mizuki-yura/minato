@@ -5,4 +5,5 @@
 - [ファイル構成](files.md)
 - [トーク定義](talk.md)
 - [セリフの書き方](dialogue.md)
+- [選択肢とウェイト](choice.md)
 - [コメント](comment.md)

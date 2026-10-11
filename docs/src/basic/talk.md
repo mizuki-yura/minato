@@ -67,6 +67,7 @@ OnUpdate.OnDownloadBegin if(save.verbose) => {
 | `OnClose` | 終了時 |
 | `OnRandomTalk` | 定期的なランダムトーク、およびユーザーが手動でトークを要求したとき |
 | `OnMouseDoubleClick` | ダブルクリック時 |
+| `OnChoiceSelect` | `On` で始まらないIDの選択肢が選ばれたとき（[選択肢とウェイト](choice.md)） |
 
 SSPが送るイベントはSSPのドキュメントを参照してください。
 

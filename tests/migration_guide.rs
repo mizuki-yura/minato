@@ -1,4 +1,4 @@
-// 移行ガイド（docs/src/migration/*.md）のサンプルコードを実際のDLLエントリポイント
+// 移行ガイド（docs/src/migration/*.md）と基本の書き方（docs/src/basic/*.md）のサンプルコードを実際のDLLエントリポイント
 // （loadu / request / unload）で実行し、ガイドに書かれた出力と一致するか検証する。
 //
 // ガイド側の書式:
@@ -274,18 +274,20 @@ fn run_sample(s: &Sample) -> Result<(), String> {
     }
 }
 
-fn guide_dir() -> PathBuf {
-    // 作業中の下書きを検証したいとき用（既定は docs/src/migration）
+fn guide_dirs() -> Vec<PathBuf> {
+    // 作業中の下書きを検証したいとき用（既定は docs/src/migration と docs/src/basic）
     if let Ok(d) = std::env::var("MIGRATION_GUIDE_DIR") {
-        return PathBuf::from(d);
+        return vec![PathBuf::from(d)];
     }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join("src").join("migration")
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join("src");
+    vec![src.join("migration"), src.join("basic")]
 }
 
 #[test]
 fn guide_samples_match_real_behavior() {
-    let mut files: Vec<PathBuf> = fs::read_dir(guide_dir())
-        .expect("docs/src/migration がありません")
+    let mut files: Vec<PathBuf> = guide_dirs()
+        .iter()
+        .flat_map(|d| fs::read_dir(d).unwrap_or_else(|_| panic!("{} がありません", d.display())))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().map_or(false, |x| x == "md"))
         .collect();
