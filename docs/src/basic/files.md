@@ -22,6 +22,40 @@ ghost/master/
 `.mnt` ファイルにトークとロジックを書きます。
 `main.mnt` が必ず読み込まれます。ファイルが大きくなった場合は `include` で分割できます。
 
+## .mntファイルのトップレベルに書けるもの
+
+トークや関数の `{ }` の外（トップレベル）に書けるのは、次の4つだけです。
+
+| 書けるもの | 例 | 説明 |
+|---|---|---|
+| トーク定義 | `OnBoot => { ... }` | [トーク定義](talk.md) |
+| 関数定義 | `func greet(name) { ... }` | [func定義と呼び出し](../func/funcdef.md) |
+| `global` | `global save.count ?= 0` | [global / save](../data/global.md) |
+| `include` | `include "events.mnt"` | [include](../include.md) |
+
+コメントと空行は、どこに書いてもかまいません。
+
+```
+include "events.mnt"
+
+global save.count ?= 0
+
+func greet(name) {
+    湊: ${name}さん、こんにちは。
+}
+
+OnBoot => {
+    let name = "ユーザー"   // let はトークの中なら書ける
+    greet(name)
+}
+```
+
+セリフ、`let`、`if`、`for`、`call` などの文は、トークか関数の中にしか書けません。
+
+`let` をトップレベルに書いたときは「let はトークや関数の中でしか使えません」というエラーになります。
+それ以外の文をトップレベルに書くと「予期しないファイル末尾があります」というエラーになります。
+このエラーが出たら、その行がトークや関数の `{ }` の外にはみ出していないか確かめてください。
+
 ## save.json
 
 `global save.*` で保存したデータが自動的にここに書き込まれます。
