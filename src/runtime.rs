@@ -114,7 +114,7 @@ mod tests {
     use super::*;
 
     fn dummy_talk(event: &str) -> Talk {
-        Talk { event: event.to_string(), cond: None, body: vec![] }
+        Talk { event: event.to_string(), cond: None, cond_line: 0, file: std::sync::Arc::from(""), body: vec![] }
     }
 
     fn as_alive(talks: &[Talk]) -> Vec<(usize, &Talk)> {

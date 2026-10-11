@@ -96,6 +96,11 @@ pub enum MatchPattern {
 pub struct Talk {
     pub event: String,
     pub cond: Option<Expr>,
+    /// cond（if(条件式)）の行番号。パース直後はpreprocess後のバイトオフセットで、
+    /// resolve_program_item_linesで元ソースの行番号に書き換える。condが無ければ0。
+    pub cond_line: u32,
+    /// 由来するファイル名（resolve_program_item_linesで設定。未設定なら空文字）
+    pub file: std::sync::Arc<str>,
     pub body: Vec<Spanned<Stmt>>,
 }
 
@@ -918,7 +923,7 @@ pub fn talk<'a>() -> impl Parser<'a, &'a str, Talk, extra::Err<Rich<'a, char>>> 
                 .ignore_then(ws())
                 .ignore_then(just('(').labelled("トーク条件は「if(」で始めます"))
                 .ignore_then(ws())
-                .ignore_then(expr())
+                .ignore_then(expr().map_with(|c, e| (c, e.span().start as u32)))
                 .then_ignore(ws())
                 .then_ignore(just(')').labelled("トーク条件の「(」は「)」で閉じてください"))
                 .then_ignore(ws_nl())
@@ -939,7 +944,13 @@ pub fn talk<'a>() -> impl Parser<'a, &'a str, Talk, extra::Err<Rich<'a, char>>> 
                 .then_ignore(just('}').labelled("トーク定義は「}」で閉じてください"))
                 .then_ignore(ws_nl())
         )
-        .map(|((event, cond), body)| Talk { event, cond, body })
+        .map(|((event, cond), body)| {
+            let (cond, cond_line) = match cond {
+                Some((c, offset)) => (Some(c), offset),
+                None => (None, 0),
+            };
+            Talk { event, cond, cond_line, file: std::sync::Arc::from(""), body }
+        })
 }
 // ── preprocess（変更なし）────────────────────────────────
 
@@ -1567,7 +1578,13 @@ pub fn resolve_program_item_lines(items: &mut [ProgramItem], src: &str, pre: &Pr
     let file = &file;
     for item in items.iter_mut() {
         match item {
-            ProgramItem::Talk(talk) => resolve_stmt_lines(&mut talk.body, src, pre, file),
+            ProgramItem::Talk(talk) => {
+                if talk.cond.is_some() {
+                    talk.cond_line = pre.resolve_line(line_at_offset(talk.cond_line, src));
+                }
+                talk.file = file.clone();
+                resolve_stmt_lines(&mut talk.body, src, pre, file)
+            }
             ProgramItem::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre, file),
             ProgramItem::Include(_) | ProgramItem::Global(_, _, _) => {}
         }
