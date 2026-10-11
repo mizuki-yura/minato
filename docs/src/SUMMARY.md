@@ -43,6 +43,7 @@
 - [ファイルとJSON](file/index.md)
 
 - [エラーと対処](error/index.md)
+  - [構文チェッカー](error/checker.md)
   - [パースエラーの読み方](error/parse.md)
   - [よくあるミス](error/common.md)
 

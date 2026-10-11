@@ -60,3 +60,5 @@ debug_log = true
 
 2回目以降の起動では `save.json` の `system.debug_log` が `config.toml` より優先されます。
 詳しくは[設定（config.toml）](../config/config.md)を参照してください。
+
+SSPに読み込ませる前に書き間違いを確かめたいときは、[構文チェッカー](../error/checker.md)が使えます。
