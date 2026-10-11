@@ -1,7 +1,7 @@
 // analyzer.rs
 // ASTの静的チェック
 use std::collections::{HashMap, HashSet};
-use crate::parser::{Stmt, Expr, Talk, Spanned};
+use crate::parser::{Stmt, Expr, Talk, Spanned, StrPart, PathSegment, MatchPattern};
 use crate::codegen::is_builtin;
 use crate::diagnostic::{Diagnostic, Level};
 
@@ -79,8 +79,99 @@ pub fn analyze(
         }
     }
 
+    /// 式の中の関数呼び出し `名前(...)` を再帰的にたどり、未定義の名前に notice を出す。
+    /// 実行時は func → talk → ビルトインの順に探すので、そのどれでもなければ未定義。
+    fn check_expr(&mut self, spanned: &Spanned<Stmt>, expr: &Expr) {
+        match expr {
+            Expr::Call(name, args) => {
+                self.check_call_name(spanned, name);
+                for a in args { self.check_expr(spanned, a); }
+            }
+            Expr::Array(items) => {
+                for e in items { self.check_expr(spanned, e); }
+            }
+            Expr::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.check_expr(spanned, k);
+                    self.check_expr(spanned, v);
+                }
+            }
+            Expr::InterpolatedStr(parts) => self.check_str_parts(spanned, parts),
+            Expr::BinOp(l, _, r)
+            | Expr::Cmp(l, _, r)
+            | Expr::And(l, r)
+            | Expr::Or(l, r)
+            | Expr::NullCoalesce(l, r)
+            | Expr::Index(l, r) => {
+                self.check_expr(spanned, l);
+                self.check_expr(spanned, r);
+            }
+            Expr::Not(e) => self.check_expr(spanned, e),
+            Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Var(_) => {}
+        }
+    }
+
+    fn check_str_parts(&mut self, spanned: &Spanned<Stmt>, parts: &[StrPart]) {
+        for p in parts {
+            if let StrPart::Expr(e) = p { self.check_expr(spanned, e); }
+        }
+    }
+
+    fn check_path(&mut self, spanned: &Spanned<Stmt>, path: &[PathSegment]) {
+        for seg in path {
+            if let PathSegment::Index(e) = seg { self.check_expr(spanned, e); }
+        }
+    }
+
+    fn check_call_name(&mut self, spanned: &Spanned<Stmt>, name: &str) {
+        if !is_builtin(name)
+            && !self.talk_names.contains(name)
+            && !self.func_names.contains(name)
+        {
+            self.push(Level::Notice, spanned, format!(
+                    "\"{}\" は未定義です（ビルトイン関数でも talk でも func でもありません）",
+                    name
+                ));
+        }
+    }
+
+    /// 文が直接持つ式（ネストしたブロックの中は除く）を検査する。
+    /// for の init/step はSpannedでない Stmt なので、外側の文の行で報告する。
+    fn check_stmt_exprs(&mut self, spanned: &Spanned<Stmt>, stmt: &Stmt) {
+        match stmt {
+            Stmt::Dialogue(line) => self.check_str_parts(spanned, &line.content),
+            Stmt::Let(_, e) | Stmt::Return(e) | Stmt::While(e, _) | Stmt::If(e, _, _) => {
+                self.check_expr(spanned, e);
+            }
+            Stmt::Global(path, _, e) | Stmt::Assign(path, _, e) => {
+                self.check_path(spanned, path);
+                self.check_expr(spanned, e);
+            }
+            Stmt::For { init, cond, step, .. } => {
+                self.check_stmt_exprs(spanned, init);
+                self.check_expr(spanned, cond);
+                self.check_stmt_exprs(spanned, step);
+            }
+            Stmt::ForEach { collection, .. } => self.check_expr(spanned, collection),
+            Stmt::Match { expr, arms } => {
+                self.check_expr(spanned, expr);
+                for arm in arms {
+                    for p in &arm.patterns {
+                        if let MatchPattern::Value(e) = p { self.check_expr(spanned, e); }
+                    }
+                }
+            }
+            // 呼び出す名前そのものは check_stmt の Stmt::Call で見るので、ここでは引数だけ
+            Stmt::Call(Expr::Call(_, args)) => {
+                for a in args { self.check_expr(spanned, a); }
+            }
+            Stmt::Call(_) | Stmt::FuncDef { .. } | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+
     fn check_stmt(&mut self, spanned: &Spanned<Stmt>) {
         let stmt = &spanned.node;
+        self.check_stmt_exprs(spanned, stmt);
         match stmt {
             Stmt::Break => {
                 if self.loop_depth == 0 {
@@ -123,17 +214,7 @@ Stmt::Call(expr) => {
                 }
             }
         }
-        Expr::Call(name, _) => {
-            if !is_builtin(name)
-                && !self.talk_names.contains(name)
-                && !self.func_names.contains(name)
-            {
-                self.push(Level::Notice, spanned, format!(
-                        "\"{}\" は未定義です（ビルトイン関数でも talk でも func でもありません）",
-                        name
-                    ));
-            }
-        }
+        Expr::Call(name, _) => self.check_call_name(spanned, name),
         _ => {}
     }
 }
@@ -578,5 +659,61 @@ OnMmmMiddle => {
         // 「OnUpdate.」が「OnUpdateOther.」に前方一致で誤って当たらないこと
         let src = "OnUpdate.OnDownloadBegin => {\n    湊: a\n}\nOnBoot => {\n    call OnUpdateOther.OnTypo\n}";
         assert!(undefined_notices(&analyze_src(src)).is_empty());
+    }
+
+    #[test]
+    fn test_undefined_call_in_expression_triggers_notice() {
+        // let の右辺、if の条件、セリフ中の ${...}、for の条件、関数の引数の中の呼び出しも検査する
+        let src = "OnBoot => {
+    let n = lenght(\"abc\")
+    if (is_nmu(n)) {
+        湊: ${to_uper(\"a\")}
+    }
+    for (let i = 0; i < lenn(\"a\"); i++) {
+    }
+    log(to_srt(1))
+}";
+        let errors = analyze_src(src);
+        let n = undefined_notices(&errors);
+        let found: Vec<(String, Option<u32>)> = n.iter().map(|e| (e.message.clone(), e.line())).collect();
+        for (name, line) in [("lenght", 2), ("is_nmu", 3), ("to_uper", 4), ("lenn", 6), ("to_srt", 8)] {
+            assert!(
+                found.iter().any(|(m, l)| m.contains(&format!("\"{}\"", name)) && *l == Some(line)),
+                "{} の notice（{}行目）がない: {:?}", name, line, found
+            );
+        }
+        assert_eq!(n.len(), 5, "{:?}", found);
+    }
+
+    #[test]
+    fn test_defined_names_in_expression_do_not_trigger_notice() {
+        // ビルトイン・トップレベルfunc・ローカルfunc・talkを式の中で呼んでもnoticeは出ない
+        let src = "func 足す(a, b) {
+    return a + b
+}
+挨拶 => {
+    湊: やあ
+}
+OnBoot => {
+    func 引く(a, b) {
+        return a - b
+    }
+    let n = 足す(len(\"ab\"), 引く(3, 1))
+    湊: ${挨拶()}${n}
+}";
+        let errors = analyze_src(src);
+        assert!(undefined_notices(&errors).is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn test_statement_call_reported_once() {
+        // 行頭の呼び出しは check_stmt と式の検査の両方で数えない（1件だけ）
+        let src = "OnBoot => {
+    挨拶すろ(lenght(\"a\"))
+}";
+        let errors = analyze_src(src);
+        let n = undefined_notices(&errors);
+        assert_eq!(n.iter().filter(|e| e.message.contains("挨拶すろ")).count(), 1, "{:?}", errors);
+        assert_eq!(n.iter().filter(|e| e.message.contains("lenght")).count(), 1, "{:?}", errors);
     }
 }
