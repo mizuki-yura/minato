@@ -1,4 +1,4 @@
-// 移行ガイド（docs/src/migration/*.md）と基本の書き方（docs/src/basic/*.md）のサンプルコードを実際のDLLエントリポイント
+// 移行ガイド（docs/src/migration/*.md）と基本の書き方（docs/src/basic/*.md）、チートシート（docs/src/cheatsheet.md）のサンプルコードを実際のDLLエントリポイント
 // （loadu / request / unload）で実行し、ガイドに書かれた出力と一致するか検証する。
 //
 // ガイド側の書式:
@@ -279,8 +279,20 @@ fn guide_dirs() -> Vec<PathBuf> {
     if let Ok(d) = std::env::var("MIGRATION_GUIDE_DIR") {
         return vec![PathBuf::from(d)];
     }
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join("src");
+    let src = docs_src();
     vec![src.join("migration"), src.join("basic")]
+}
+
+// ディレクトリ単位ではなく、1ファイルだけ検証するページ
+fn guide_files() -> Vec<PathBuf> {
+    if std::env::var("MIGRATION_GUIDE_DIR").is_ok() {
+        return Vec::new();
+    }
+    vec![docs_src().join("cheatsheet.md")]
+}
+
+fn docs_src() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("docs").join("src")
 }
 
 #[test]
@@ -290,6 +302,7 @@ fn guide_samples_match_real_behavior() {
         .flat_map(|d| fs::read_dir(d).unwrap_or_else(|_| panic!("{} がありません", d.display())))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().map_or(false, |x| x == "md"))
+        .chain(guide_files())
         .collect();
     files.sort();
 
