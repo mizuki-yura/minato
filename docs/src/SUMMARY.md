@@ -2,6 +2,8 @@
 
 [はじめに](README.md)
 
+[チートシート](cheatsheet.md)
+
 - [湊とは](intro/what_is_minato.md)
 - [インストールと最初のゴースト](intro/install.md)
 
