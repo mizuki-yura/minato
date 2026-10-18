@@ -9,7 +9,7 @@
 | 台本 | `dic*.txt`。既定は Shift_JIS（`satori_bootconf.txt` の `is_utf8_dic` で UTF-8 も可） | `talks/main.mnt`（とその `include`）。**UTF-8（BOMなし）だけ** |
 | 設定ファイル | `satori_conf.txt` | `config.toml`。UTF-8（BOMがあっても読める） |
 | セーブデータ | `satori_savedata.txt`。既定は Shift_JIS | `save.json`。UTF-8（**BOMなし**） |
-| SSPとの通信 | 里々が処理する | **常に Shift_JIS**（応答に `Charset: Shift_JIS` を付ける） |
+| SSPとの通信 | 里々が処理する | リクエストは `Charset` ヘッダに従って読む。応答は既定で **UTF-8**（`config.toml` の `encoding` で Shift_JIS にもできる） |
 | ファイル操作 | — | `file_read` / `file_write` は既定 UTF-8。第2・3引数に `"sjis"` を渡すと Shift_JIS |
 | SAORIとの通信 | — | UTF-8（[8. SAORI呼び出し](saori.md)） |
 
@@ -30,9 +30,9 @@ $enc = New-Object Text.UTF8Encoding($false)
 
 `config.toml` のBOMは問題ありません。`save.json` は、BOMがあると壊れたものとして扱われます（[9. セーブデータ](savedata.md)）。
 
-### 出力できない文字
+### SSPに返す文字コード
 
-湊は、SSPに返すスクリプトを Shift_JIS（Windows-31J）に変換します。**Shift_JIS に無い文字は、`&#数値;` の形（数値文字参照）に置き換わり、そのまま画面に出ます。**
+湊は、SSPに返すスクリプトを、既定では **UTF-8** で返します（応答に `Charset: UTF-8` を付けます）。絵文字なども、そのまま出ます。
 
 <!--run OnBoot-->
 ```mnt
@@ -41,6 +41,23 @@ OnBoot => {
 }
 ```
 ```text
+\0①丸数字と😀と𠮷と髙と−。\e
+```
+
+SSPから届くリクエストは、リクエストの `Charset` ヘッダに従って読みます（ヘッダが無ければ Shift_JIS として読みます）。
+
+### Shift_JIS で返す
+
+`config.toml` に次のように書くと、応答を Shift_JIS（Windows-31J）で返します（応答に `Charset: Shift_JIS` を付けます）。
+
+```toml
+[settings]
+encoding = "Shift_JIS"
+```
+
+このとき、**Shift_JIS に無い文字は、`&#数値;` の形（数値文字参照）に置き換わり、そのまま画面に出ます。** 上の例は、次のように出ます。
+
+```text
 \0①丸数字と&#128512;と&#134071;と髙と－。\e
 ```
 
@@ -48,7 +65,7 @@ OnBoot => {
 - 絵文字（`😀`）や `𠮷` などは、`&#128512;` のように化けます。
 - `−`（U+2212、数学のマイナス）は、エラーにならず**全角ハイフン `－` に置き換わります**。
 
-里々の辞書はもともと Shift_JIS で書かれているので、**里々から移した文章は影響を受けません**。新しく UTF-8 で書く文章に、絵文字などを入れたときだけ問題になります。
+`encoding` に書けるのは `"UTF-8"` と `"Shift_JIS"` だけです（`"utf8"`、`"sjis"` も使えます）。ほかの値を書くと、`config.toml` の読み込みに失敗し、ゴーストが起動しません。
 
 ## 改行のルール
 

@@ -90,7 +90,7 @@ YAYAの機能の対応は[付録A](yaya.md)にまとめています。主なも�
 | `[settings]` `debug_log` | `true` でログを出す。同上 |
 | `[settings]` `auto_newline` | 話者に戻るときの自動 `\n`（既定 `true`） |
 | `[settings]` `shuffle_reset` | **読み込まれるが、使われない。** 設定しても動作は変わらない |
-| `[settings]` `encoding` | **読み込まれるが、使われない。** 通信は常に Shift_JIS |
+| `[settings]` `encoding` | SSPに返す応答の文字コード。`"UTF-8"`（既定）か `"Shift_JIS"`（[10.](encoding.md#shift_jis-で返す)） |
 
 ## 制限の一覧
 

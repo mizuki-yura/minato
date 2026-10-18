@@ -58,6 +58,24 @@ impl Default for Settings {
 
 fn default_true() -> bool { true }
 fn default_encoding() -> String { "UTF-8".to_string() }
+
+/// encoding の値を「UTF-8か」に変換する。知らない値ならNone。
+/// 綴りの揺れは file_read / file_write の文字コード指定に合わせる。
+fn parse_encoding(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "utf-8" | "utf8" => Some(true),
+        "shift_jis" | "shift-jis" | "sjis" => Some(false),
+        _ => None,
+    }
+}
+
+impl Settings {
+    /// SSPへの応答をUTF-8で返すか。値はConfig::loadで確かめ済みなので、
+    /// 知らない値は来ないが、来たらUTF-8にする。
+    pub fn response_is_utf8(&self) -> bool {
+        parse_encoding(&self.encoding).unwrap_or(true)
+    }
+}
 fn default_talk_interval() -> u64 {300}
 fn default_talk_jitter() -> u64 {180}
 // ── 読み込み ─────────────────────────────────────────────
@@ -69,6 +87,12 @@ impl Config {
         let src: String = src.lines().collect::<Vec<_>>().join("\n");
         let config: Config = toml::from_str(&src)
             .map_err(|e| format!("config.toml のパースエラー: {}", e))?;
+        if parse_encoding(&config.settings.encoding).is_none() {
+            return Err(format!(
+                "config.toml の encoding は \"UTF-8\" か \"Shift_JIS\" にしてください（今は「{}」）",
+                config.settings.encoding
+            ));
+        }
 
         // 以前はここでnormalize_tag()によるエスケープ「正規化」処理を挟んでいたが、
         // 実装を精査した結果、その内部の置換ロジックが実質的なno-opであることが判明し、
@@ -135,5 +159,23 @@ fn test_backslash_escape_handled_by_toml_parser_alone() {
     assert_eq!(tag.len(), 2, "バックスラッシュ1文字+ゼロの2バイトであるべき: {:?}", tag);
     assert_eq!(tag.as_bytes()[0], b'\\');
     assert_eq!(tag.as_bytes()[1], b'0');
+}
+#[test]
+fn test_encoding_values() {
+    assert!(parse("[settings]\nencoding = \"UTF-8\"\n").settings.response_is_utf8());
+    assert!(parse("[settings]\nencoding = \"utf8\"\n").settings.response_is_utf8());
+    assert!(!parse("[settings]\nencoding = \"Shift_JIS\"\n").settings.response_is_utf8());
+    assert!(!parse("[settings]\nencoding = \"sjis\"\n").settings.response_is_utf8());
+    // 書かなければUTF-8
+    assert!(parse("[characters]\n").settings.response_is_utf8());
+}
+
+#[test]
+fn test_unknown_encoding_is_load_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[settings]\nencoding = \"EUC-JP\"\n").unwrap();
+    let err = Config::load(&path).unwrap_err();
+    assert!(err.contains("EUC-JP"), "{}", err);
 }
 }

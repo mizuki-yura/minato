@@ -38,6 +38,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static DEBUG_LOG: AtomicBool = AtomicBool::new(false);
 
+/// SSPへの応答をUTF-8で返すか（falseならShift_JIS）。config.tomlの
+/// [settings] encoding で決まる。ロード前やconfig.tomlが読めないときはUTF-8。
+static RESPONSE_UTF8: AtomicBool = AtomicBool::new(true);
+
 /// このロード期間中に一度でもパニックが起きたか。
 /// requestはcatch_unwindでパニックを握り潰すため、パニック後も
 /// 通常どおりリクエスト処理が続き、中途半端なcodegen状態のまま
@@ -86,6 +90,46 @@ const CORRUPT_BAK: &str = "save.json.corrupt.bak";
 /// 呼び出し元の実装バグ等に対する防御として下限0にクランプする。
 fn safe_len(len: c_long) -> usize {
     len.max(0) as usize
+}
+
+/// リクエストのCharsetヘッダが UTF-8 か。ヘッダ部はASCIIなので、
+/// デコードする前にバイト列のまま探せる。ヘッダが無ければShift_JISとみなす。
+fn request_is_utf8(bytes: &[u8]) -> bool {
+    bytes
+        .split(|&b| b == b'\n')
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| {
+            let colon = l.iter().position(|&b| b == b':')?;
+            let (name, value) = (&l[..colon], &l[colon + 1..]);
+            name.eq_ignore_ascii_case(b"Charset").then_some(value)
+        })
+        .any(|v| {
+            let v = v.trim_ascii();
+            v.eq_ignore_ascii_case(b"UTF-8") || v.eq_ignore_ascii_case(b"UTF8")
+        })
+}
+
+/// 応答にCharsetヘッダを付けて、その文字コードのバイト列にする。
+/// 応答を作る関数はCharsetを書かず、ここで1か所だけで決める。
+/// Shift_JISに無い文字は、encoding_rsが `&#数値;` に置き換える。
+fn encode_response(response: &str, utf8: bool) -> Vec<u8> {
+    let charset = if utf8 { "UTF-8" } else { "Shift_JIS" };
+    let response = response.replacen("\r\n", &format!("\r\nCharset: {}\r\n", charset), 1);
+    if utf8 {
+        response.into_bytes()
+    } else {
+        SHIFT_JIS.encode(&response).0.into_owned()
+    }
+}
+
+/// リクエストを、Charsetヘッダに従って文字列にする。
+fn decode_request(bytes: &[u8]) -> String {
+    if request_is_utf8(bytes) {
+        String::from_utf8_lossy(bytes).into_owned()
+    } else {
+        SHIFT_JIS.decode(bytes).0.into_owned()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -231,7 +275,7 @@ pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
     let response = std::panic::catch_unwind(|| {
         unsafe {
             let bytes = std::slice::from_raw_parts(h as *const u8, safe_len(*len));
-            let req_str = SHIFT_JIS.decode(bytes).0.into_owned(); // ← Cowを所有権ありStringに変換
+            let req_str = decode_request(bytes);
 
             let result = handle_request(&req_str); // ← GlobalFreeより先に処理を終わらせる
 
@@ -249,8 +293,8 @@ pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
     });
 
     unsafe {
-        let (encoded, _, _) = SHIFT_JIS.encode(&response);
-        let bytes = encoded.as_ref();
+        let encoded = encode_response(&response, RESPONSE_UTF8.load(Ordering::Relaxed));
+        let bytes = encoded.as_slice();
         let size = bytes.len() + 1;
         let mem = GlobalAlloc(GMEM_FIXED, size);
         if mem.is_null() {
@@ -334,6 +378,7 @@ fn load_program_guarded(
 
         DEBUG_LOG.store(config.settings.debug_log, Ordering::Relaxed);
     append_log!(format!("debug_log enabled"));
+    RESPONSE_UTF8.store(config.settings.response_is_utf8(), Ordering::Relaxed);
     let mut init_errors: Vec<(String, String)> = Vec::new();
 let panic_bak = dir.join(PANIC_BAK);
 if panic_bak.exists() && !dir.join(PANIC_BAK_NOTIFIED).exists() {
@@ -825,7 +870,7 @@ fn next_talk_time(interval: u64, jitter: u64) -> Instant {
 fn shiori_response(script: &str) -> String {
         append_log!(format!("★RESPONSE 200★ value=[{}]", script));
     format!(
-        "SHIORI/3.0 200 OK\r\nCharset: Shift_JIS\r\nSender: minato\r\nValue: {}\r\n\r\n",
+        "SHIORI/3.0 200 OK\r\nSender: minato\r\nValue: {}\r\n\r\n",
         script
     )
 }
@@ -836,7 +881,7 @@ fn shiori_response(script: &str) -> String {
 /// 台本のトーク出力ではなく固定的なメタ情報を返す用途として区別する。
 fn shiori_resource_response(value: &str) -> String {
     format!(
-        "SHIORI/3.0 200 OK\r\nCharset: Shift_JIS\r\nSender: minato\r\nValue: {}\r\n\r\n",
+        "SHIORI/3.0 200 OK\r\nSender: minato\r\nValue: {}\r\n\r\n",
         value
     )
 }
@@ -850,19 +895,19 @@ fn shiori_response_with_error(script: &str, errors: &[(String, String)]) -> Stri
         .collect::<Vec<_>>()
         .join("\x01");
     format!(
-        "SHIORI/3.0 200 OK\r\nCharset: Shift_JIS\r\nSender: minato\r\nValue: {}\r\nErrorLevel: {}\r\nErrorDescription: {}\r\n\r\n",
+        "SHIORI/3.0 200 OK\r\nSender: minato\r\nValue: {}\r\nErrorLevel: {}\r\nErrorDescription: {}\r\n\r\n",
         script, levels, descs
     )
 }
 
 fn not_found_response() -> String {
        append_log!(format!("★NOT_FOUND★ called"));
-    "SHIORI/3.0 204 No Content\r\nCharset: Shift_JIS\r\nSender: minato\r\n\r\n".to_string()
+    "SHIORI/3.0 204 No Content\r\nSender: minato\r\n\r\n".to_string()
 }
 
 fn error_response(msg: &str) -> String {
     format!(
-        "SHIORI/3.0 400 Bad Request\r\nCharset: Shift_JIS\r\nSender: minato\r\nValue: [minato error: {}]\r\n\r\n",
+        "SHIORI/3.0 400 Bad Request\r\nSender: minato\r\nValue: [minato error: {}]\r\n\r\n",
         msg
     )
 }
@@ -1957,4 +2002,64 @@ fn test_balloon_parse_error_is_single_line_header() {
     let (body, desc) = boot_error_parts(state);
     assert!(body.contains("\\nmain.mntの2行目: "), "{}", body);
     assert!(desc.starts_with("main.mntの2行目: "), "{}", desc);
+}
+
+#[cfg(test)]
+mod charset_tests {
+    use super::*;
+
+    #[test]
+    fn request_charset_header_is_detected() {
+        assert!(request_is_utf8(b"GET SHIORI/3.0\r\nCharset: UTF-8\r\nID: OnBoot\r\n\r\n"));
+        assert!(request_is_utf8(b"GET SHIORI/3.0\r\ncharset:utf-8\r\n\r\n"));
+        assert!(!request_is_utf8(b"GET SHIORI/3.0\r\nCharset: Shift_JIS\r\n\r\n"));
+        // ヘッダが無ければShift_JIS
+        assert!(!request_is_utf8(b"GET SHIORI/3.0\r\nID: OnBoot\r\n\r\n"));
+        // 空行より後（ヘッダ部の外）は見ない
+        assert!(!request_is_utf8(b"GET SHIORI/3.0\r\n\r\nCharset: UTF-8\r\n"));
+    }
+
+    #[test]
+    fn request_is_decoded_by_its_charset() {
+        let utf8 = "GET SHIORI/3.0\r\nCharset: UTF-8\r\nReference0: 湊😀\r\n\r\n";
+        assert_eq!(decode_request(utf8.as_bytes()), utf8);
+
+        let sjis = "GET SHIORI/3.0\r\nCharset: Shift_JIS\r\nReference0: 湊\r\n\r\n";
+        let (bytes, _, _) = SHIFT_JIS.encode(sjis);
+        assert_eq!(decode_request(&bytes), sjis);
+    }
+
+    #[test]
+    fn utf8_response_keeps_emoji_and_says_utf8() {
+        let out = encode_response(&shiori_response("湊😀"), true);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("SHIORI/3.0 200 OK\r\nCharset: UTF-8\r\n"), "{}", s);
+        assert!(s.contains("Value: 湊😀\r\n"), "{}", s);
+        assert_eq!(s.matches("Charset:").count(), 1, "{}", s);
+    }
+
+    #[test]
+    fn shift_jis_response_uses_numeric_references() {
+        let out = encode_response(&shiori_response("湊😀"), false);
+        let s = SHIFT_JIS.decode(&out).0.into_owned();
+        assert!(s.starts_with("SHIORI/3.0 200 OK\r\nCharset: Shift_JIS\r\n"), "{}", s);
+        assert!(s.contains("Value: 湊&#128512;\r\n"), "{}", s);
+    }
+
+    #[test]
+    fn every_response_kind_gets_one_charset_header() {
+        let errors = vec![("warning".to_string(), "x".to_string())];
+        for r in [
+            shiori_response("a"),
+            shiori_resource_response("a"),
+            shiori_response_with_error("a", &errors),
+            not_found_response(),
+            error_response("a"),
+        ] {
+            let s = String::from_utf8(encode_response(&r, true)).unwrap();
+            let second_line = s.split("\r\n").nth(1).unwrap();
+            assert_eq!(second_line, "Charset: UTF-8", "{}", s);
+            assert_eq!(s.matches("Charset:").count(), 1, "{}", s);
+        }
+    }
 }

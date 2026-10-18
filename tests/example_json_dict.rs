@@ -41,7 +41,19 @@ fn send(id: &str) -> String {
     assert!(!out.is_null(), "{} の応答がnull", id);
     let bytes = unsafe { std::slice::from_raw_parts(out as *const u8, len as usize) }.to_vec();
     unsafe { GlobalFree(out) };
-    SHIFT_JIS.decode(&bytes).0.into_owned()
+    decode_response(&bytes)
+}
+
+/// 応答を、応答自身の Charset ヘッダに従って文字列にする（ヘッダはASCIIなので先に読める）。
+fn decode_response(bytes: &[u8]) -> String {
+    let head = String::from_utf8_lossy(bytes);
+    let utf8 = head.lines().take_while(|l| !l.is_empty())
+        .any(|l| l.eq_ignore_ascii_case("Charset: UTF-8"));
+    if utf8 {
+        String::from_utf8(bytes.to_vec()).expect("Charset: UTF-8 なのにUTF-8として読めない")
+    } else {
+        SHIFT_JIS.decode(bytes).0.into_owned()
+    }
 }
 
 /// 応答からValueを取り出す。警告やエラーが付いていたら失敗にする
