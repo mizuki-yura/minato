@@ -1042,6 +1042,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Value {
         Expr::Str(s)    => Value::Str(s.clone()),
         Expr::Number(n) => Value::Number(*n),
         Expr::Bool(b)   => Value::Bool(*b),
+        Expr::Null      => Value::Null,
         Expr::Var(path) => env.get_path_str(path),
         Expr::InterpolatedStr(parts) => {
             Value::Str(parts.iter().map(|p| match p {
@@ -2297,6 +2298,7 @@ Expr::Array(items) => Value::Array(items.iter().map(|e| self.eval_expr_full(e)).
 Expr::Str(s)    => Value::Str(s.clone()),
 Expr::Number(n) => Value::Number(*n),
 Expr::Bool(b)   => Value::Bool(*b),
+Expr::Null      => Value::Null,
 Expr::Var(path) => self.get_path_checked(path),
         }
     }
@@ -3366,6 +3368,40 @@ fn test_not_true_literal() {
     let talks = parse_talks(src);
     let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0B\\e");
+}
+
+#[test]
+fn test_null_literal() {
+    let src = r#"OnBoot => {
+    let x = null
+    湊: ${is_null(x)} ${get({}, "k", null) ?? "代替"}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\0true 代替\\e");
+}
+
+#[test]
+fn test_null_literal_is_not_shadowed_by_variable() {
+    // null は変数ではなくリテラルなので、同名の let があっても null のまま
+    let src = r#"OnBoot => {
+    let null = 1
+    湊: ${is_null(null)}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\0true\\e");
+}
+
+#[test]
+fn test_identifier_starting_with_null() {
+    let src = r#"OnBoot => {
+    let nullable = 5
+    湊: ${nullable}
+}"#;
+    let talks = parse_talks(src);
+    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
+    assert_eq!(out, "\\05\\e");
 }
 
 

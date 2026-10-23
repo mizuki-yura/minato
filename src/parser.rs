@@ -25,6 +25,7 @@ pub enum Expr {
     Str(String),
     Number(f64),
     Bool(bool),
+    Null,
     Var(Vec<String>),
     InterpolatedStr(Vec<StrPart>),
     Call(String, Vec<Expr>),
@@ -307,6 +308,7 @@ let map_lit = just('{')
         .or(number())
         .or(keyword("true").to(Expr::Bool(true)))
         .or(keyword("false").to(Expr::Bool(false)))
+        .or(keyword("null").to(Expr::Null))
         .or(map_lit)
         .or(array)
         .or(call)

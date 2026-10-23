@@ -307,7 +307,7 @@ pub fn analyze(
                 self.fv_expr(at, r);
             }
             Expr::Not(e) => self.fv_expr(at, e),
-            Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) => {}
+            Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null => {}
         }
     }
 
@@ -370,7 +370,7 @@ pub fn analyze(
                 self.check_expr(at, r);
             }
             Expr::Not(e) => self.check_expr(at, e),
-            Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Var(_) => {}
+            Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) => {}
         }
     }
 
@@ -1156,5 +1156,20 @@ OnRandomTalk if(仲良し() && len(\"a\") > 0) => {
     fn test_free_var_for_step_is_not_a_global_declaration() {
         let src = "OnBoot => {\n    for (let i = 0; i < 3; i++) {\n    }\n}\nOnClose => {\n    湊: ${i}\n}";
         assert_eq!(free_var_notices(&analyze_src_with_globals(src)).len(), 1);
+    }
+
+    #[test]
+    fn test_free_var_null_literal_no_notice() {
+        let src = "func f() {
+    let x = get({}, \"k\", null)
+    if (is_null(x)) {
+        return null
+    }
+    return x
+}
+OnBoot => {
+    湊: ${f()}${null}
+}";
+        assert!(free_var_notices(&analyze_src_with_globals(src)).is_empty());
     }
 }
