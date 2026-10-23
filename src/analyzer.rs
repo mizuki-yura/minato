@@ -1,7 +1,7 @@
 // analyzer.rs
 // ASTの静的チェック
 use std::collections::{HashMap, HashSet};
-use crate::parser::{Stmt, Expr, Talk, Spanned, StrPart, PathSegment, MatchPattern};
+use crate::parser::{Stmt, Expr, Talk, Spanned, StrPart, PathSegment, MatchPattern, AssignOp};
 use crate::codegen::is_builtin;
 use crate::diagnostic::{Diagnostic, Level};
 
@@ -26,6 +26,29 @@ pub struct Analyzer<'a> {
     errors: Vec<Diagnostic>,
     loop_depth: usize,
     current_context: &'a str,
+    /// globalとして宣言された名前（パスの先頭）。トップレベル＋talk/func内のglobal文
+    global_names: HashSet<String>,
+    /// 自由変数チェック用のletスコープ（内側が末尾）
+    let_scopes: Vec<HashSet<String>>,
+    /// 自由変数チェックで報告済みの名前（talk/funcごとにリセット）
+    reported_reads: HashSet<String>,
+    reported_assigns: HashSet<String>,
+}
+
+/// 処理系が用意する変数。引数・let・globalのどれでもなくても読める。
+/// reference/now はイベントごとのローカル、system/status はグローバル。
+const AMBIENT_NAMES: &[&str] = &["reference", "now", "system", "status"];
+
+/// トップレベルの global 文から、宣言された名前（パスの先頭）を集める。
+pub fn top_global_names(globals: &[(Vec<PathSegment>, AssignOp, Expr)]) -> HashSet<String> {
+    globals.iter().filter_map(|(path, _, _)| path_head(path)).collect()
+}
+
+fn path_head(path: &[PathSegment]) -> Option<String> {
+    match path.first() {
+        Some(PathSegment::Key(k)) => Some(k.clone()),
+        _ => None,
+    }
 }
 
 impl<'a> Analyzer<'a> {
@@ -39,7 +62,18 @@ impl<'a> Analyzer<'a> {
             errors: vec![],
             loop_depth: 0,
             current_context: "",
+            global_names: HashSet::new(),
+            let_scopes: vec![],
+            reported_reads: HashSet::new(),
+            reported_assigns: HashSet::new(),
         }
+    }
+
+    /// トップレベルの global 文で宣言された名前を渡す。
+    /// talk/func内の global 文はanalyzeの中で集める。
+    pub fn with_global_names(mut self, names: HashSet<String>) -> Self {
+        self.global_names.extend(names);
+        self
     }
 
 pub fn analyze(
@@ -52,6 +86,14 @@ pub fn analyze(
     // エラーメッセージの並びを安定させるためイベント名でソートしてから走査する。
     let mut talk_names_sorted: Vec<&String> = talks.keys().collect();
     talk_names_sorted.sort();
+
+    // talk/func内の global 文で宣言された名前も、どこからでも読めるglobalとして扱う
+    for talk in talks.values().flatten() {
+        collect_global_names_into(&talk.body, &mut self.global_names);
+    }
+    for (_, _, body) in funcs {
+        collect_global_names_into(body, &mut self.global_names);
+    }
 
    for event_name in talk_names_sorted {
         let talk_list = &talks[event_name];
@@ -66,20 +108,220 @@ pub fn analyze(
             let local_funcs = collect_local_func_names(&talk.body);
             for name in &local_funcs { self.func_names.insert(name.clone()); }
             self.check_stmts(&talk.body);
+            self.begin_free_var_check(&[]);
+            if let Some(cond) = &talk.cond {
+                self.fv_expr(Pos { file: &talk.file, line: talk.cond_line }, cond);
+            }
+            self.fv_stmts(&talk.body);
             for name in &local_funcs { self.func_names.remove(name); }
         }
     }
     // トップレベルfuncを検査（Vec由来なので元々順序は安定）
-    for (name, _params, body) in funcs {
+    for (name, params, body) in funcs {
         self.current_context = name;
         self.loop_depth = 0;
         let local_funcs = collect_local_func_names(body);
         for n in &local_funcs { self.func_names.insert(n.clone()); }
         self.check_stmts(body);
+        self.begin_free_var_check(params);
+        self.fv_stmts(body);
         for n in &local_funcs { self.func_names.remove(n); }
     }
     self.errors
 }
+
+    // ---- 自由変数チェック ----
+    // 実行時、func/talkの呼び出しは呼び出し元のスコープの上に積まれるため、
+    // 引数・let・globalのどれでもない名前を読み書きすると、呼び出し元のletに
+    // 触ってしまう（呼び出し元に無ければ、読みはnull・書きはglobalの新規作成）。
+    // 依存している箇所を洗い出すため、そうした名前にnoticeを出す。
+
+    fn begin_free_var_check(&mut self, params: &[String]) {
+        self.let_scopes = vec![params.iter().cloned().collect()];
+        self.reported_reads.clear();
+        self.reported_assigns.clear();
+    }
+
+    fn is_bound(&self, name: &str) -> bool {
+        self.let_scopes.iter().any(|s| s.contains(name))
+            || self.global_names.contains(name)
+            || AMBIENT_NAMES.contains(&name)
+            || self.func_names.contains(name)
+            || self.talk_names.contains(name)
+    }
+
+    fn declare(&mut self, name: &str) {
+        if let Some(scope) = self.let_scopes.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    fn fv_read(&mut self, at: Pos<'_>, name: &str) {
+        if !self.is_bound(name) && self.reported_reads.insert(name.to_string()) {
+            self.push_at(Level::Notice, at, format!(
+                "\"{}\" は引数・let・global のどれでもありません。呼び出し元の let を読んでいる可能性があります（セーブデータにだけ残る変数なら無視してください）",
+                name
+            ));
+        }
+    }
+
+    fn fv_assign(&mut self, at: Pos<'_>, name: &str) {
+        if !self.is_bound(name) && self.reported_assigns.insert(name.to_string()) {
+            self.push_at(Level::Notice, at, format!(
+                "\"{}\" への代入は、呼び出し元の変数を書き換えるか、グローバル変数を新しく作ります（let か global を付けてください）",
+                name
+            ));
+        }
+    }
+
+    fn fv_stmts(&mut self, stmts: &[Spanned<Stmt>]) {
+        for spanned in stmts {
+            self.fv_stmt(Pos::of(spanned), &spanned.node);
+        }
+    }
+
+    /// 実行時と同じく新しいletスコープを積んで文リストを検査する。
+    fn fv_scoped(&mut self, stmts: &[Spanned<Stmt>]) {
+        self.let_scopes.push(HashSet::new());
+        self.fv_stmts(stmts);
+        self.let_scopes.pop();
+    }
+
+    fn fv_path_indices(&mut self, at: Pos<'_>, path: &[PathSegment]) {
+        for seg in path {
+            if let PathSegment::Index(e) = seg { self.fv_expr(at, e); }
+        }
+    }
+
+    /// for の init/step はSpannedでない Stmt なので、Pos を外から受け取る。
+    fn fv_stmt(&mut self, at: Pos<'_>, stmt: &Stmt) {
+        match stmt {
+            Stmt::Dialogue(line) => self.fv_str_parts(at, &line.content),
+            // 右辺は束縛より先に評価される（let x = x + 1 の右辺のxは外側のx）
+            Stmt::Let(name, e) => {
+                self.fv_expr(at, e);
+                self.declare(name);
+            }
+            Stmt::Global(path, _, e) => {
+                self.fv_path_indices(at, path);
+                self.fv_expr(at, e);
+            }
+            Stmt::Assign(path, _, e) => {
+                self.fv_path_indices(at, path);
+                self.fv_expr(at, e);
+                if let Some(head) = path_head(path) { self.fv_assign(at, &head); }
+            }
+            Stmt::If(cond, then_body, else_body) => {
+                self.fv_expr(at, cond);
+                self.fv_scoped(then_body);
+                if let Some(eb) = else_body { self.fv_scoped(eb); }
+            }
+            Stmt::While(cond, body) => {
+                self.fv_expr(at, cond);
+                self.fv_scoped(body);
+            }
+            // initのletはループ全体を囲むスコープに入る
+            Stmt::For { init, cond, step, body } => {
+                self.let_scopes.push(HashSet::new());
+                self.fv_stmt(at, init);
+                self.fv_expr(at, cond);
+                self.fv_scoped(body);
+                self.fv_for_step(at, step);
+                self.let_scopes.pop();
+            }
+            Stmt::ForEach { collection, key, value, body } => {
+                self.fv_expr(at, collection);
+                self.let_scopes.push(HashSet::new());
+                self.declare(key);
+                if let Some(v) = value { self.declare(v); }
+                self.fv_stmts(body);
+                self.let_scopes.pop();
+            }
+            Stmt::Match { expr, arms } => {
+                self.fv_expr(at, expr);
+                for arm in arms {
+                    for p in &arm.patterns {
+                        if let MatchPattern::Value(e) = p { self.fv_expr(at, e); }
+                    }
+                    self.fv_scoped(&arm.body);
+                }
+            }
+            Stmt::Return(e) => self.fv_expr(at, e),
+            // call hoge / call reference.0 の名前は変数の読みとしては扱わない
+            Stmt::Call(Expr::Call(_, args)) => {
+                for a in args { self.fv_expr(at, a); }
+            }
+            // ローカル定義のfuncは外側のletを捕まえない（実行時に見えるのは呼び出し元）ので、
+            // 外側とは切り離し、引数だけを束縛として検査する
+            Stmt::FuncDef { params, body, .. } => {
+                let outer_scopes = std::mem::take(&mut self.let_scopes);
+                let outer_reads = std::mem::take(&mut self.reported_reads);
+                let outer_assigns = std::mem::take(&mut self.reported_assigns);
+                self.begin_free_var_check(params);
+                self.fv_stmts(body);
+                self.let_scopes = outer_scopes;
+                self.reported_reads = outer_reads;
+                self.reported_assigns = outer_assigns;
+            }
+            Stmt::Call(_) | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+
+    /// for の step（i++ 等）。パーサーはGlobal文として作るが、
+    /// 実行時は let と同じくスコープをさかのぼって代入する（step_for）。
+    fn fv_for_step(&mut self, at: Pos<'_>, step: &Stmt) {
+        if let Stmt::Global(path, _, e) = step {
+            self.fv_path_indices(at, path);
+            self.fv_expr(at, e);
+            if let Some(head) = path_head(path) { self.fv_assign(at, &head); }
+        } else {
+            self.fv_stmt(at, step);
+        }
+    }
+
+    fn fv_expr(&mut self, at: Pos<'_>, expr: &Expr) {
+        match expr {
+            Expr::Var(path) => {
+                if let Some(head) = path.first() { self.fv_read(at, head); }
+            }
+            Expr::InterpolatedStr(parts) => self.fv_str_parts(at, parts),
+            Expr::Call(_, args) => {
+                for a in args { self.fv_expr(at, a); }
+            }
+            Expr::Array(items) => {
+                for e in items { self.fv_expr(at, e); }
+            }
+            Expr::Map(pairs) => {
+                for (k, v) in pairs {
+                    self.fv_expr(at, k);
+                    self.fv_expr(at, v);
+                }
+            }
+            Expr::BinOp(l, _, r)
+            | Expr::Cmp(l, _, r)
+            | Expr::And(l, r)
+            | Expr::Or(l, r)
+            | Expr::NullCoalesce(l, r)
+            | Expr::Index(l, r) => {
+                self.fv_expr(at, l);
+                self.fv_expr(at, r);
+            }
+            Expr::Not(e) => self.fv_expr(at, e),
+            Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) => {}
+        }
+    }
+
+    fn fv_str_parts(&mut self, at: Pos<'_>, parts: &[StrPart]) {
+        for p in parts {
+            match p {
+                StrPart::Var(path) => {
+                    if let Some(head) = path.first() { self.fv_read(at, head); }
+                }
+                StrPart::Expr(e) => self.fv_expr(at, e),
+                StrPart::Lit(_) => {}
+            }
+        }
+    }
 
     fn push(&mut self, level: Level, spanned: &Spanned<Stmt>, message: impl Into<String>) {
         self.push_at(level, Pos::of(spanned), message);
@@ -311,6 +553,37 @@ fn collect_local_func_names_into(stmts: &[Spanned<Stmt>], names: &mut HashSet<St
             Stmt::Match { arms, .. } => {
                 for arm in arms {
                     collect_local_func_names_into(&arm.body, names);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 文リスト（ネストしたブロック・ローカルfuncの中も含む）の global 文から、
+/// 宣言された名前（パスの先頭）を集める。
+/// for の step はパーサー上Global文だが実際はローカルへの代入なので含めない。
+fn collect_global_names_into(stmts: &[Spanned<Stmt>], names: &mut HashSet<String>) {
+    for spanned in stmts {
+        match &spanned.node {
+            Stmt::Global(path, _, _) => {
+                if let Some(head) = path_head(path) { names.insert(head); }
+            }
+            Stmt::If(_, then_body, else_body) => {
+                collect_global_names_into(then_body, names);
+                if let Some(eb) = else_body {
+                    collect_global_names_into(eb, names);
+                }
+            }
+            Stmt::While(_, body)
+            | Stmt::For { body, .. }
+            | Stmt::ForEach { body, .. }
+            | Stmt::FuncDef { body, .. } => {
+                collect_global_names_into(body, names);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_global_names_into(&arm.body, names);
                 }
             }
             _ => {}
@@ -771,5 +1044,117 @@ OnRandomTalk if(仲良し() && len(\"a\") > 0) => {
     湊: a
 }";
         assert!(undefined_notices(&analyze_src(src)).is_empty());
+    }
+
+    // ---- 自由変数チェック ----
+
+    /// トップレベルのglobal文も拾ってanalyzeする。
+    fn analyze_src_with_globals(src: &str) -> Vec<Diagnostic> {
+        let pre = preprocess(src).expect("preprocess failed");
+        let mut items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
+        resolve_program_item_lines(&mut items, &pre.src, &pre, "main.mnt");
+        let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+        let mut funcs = vec![];
+        let mut globals = vec![];
+        for item in items {
+            match item {
+                ProgramItem::Talk(t) => talk_map.entry(t.event.clone()).or_default().push(t),
+                ProgramItem::FuncDef { name, params, body } => funcs.push((name, params, body)),
+                ProgramItem::Global(path, op, expr) => globals.push((path, op, expr)),
+                _ => {}
+            }
+        }
+        let talk_names: HashSet<String> = talk_map.keys().cloned().collect();
+        let func_names: HashSet<String> = funcs.iter().map(|(n, _, _)| n.clone()).collect();
+        Analyzer::new(talk_names, func_names)
+            .with_global_names(top_global_names(&globals))
+            .analyze(&talk_map, &funcs)
+    }
+
+    fn free_var_notices(errors: &[Diagnostic]) -> Vec<&Diagnostic> {
+        errors.iter()
+            .filter(|e| e.level == Level::Notice
+                && (e.message.contains("引数・let・global") || e.message.contains("への代入は")))
+            .collect()
+    }
+
+    #[test]
+    fn test_free_var_func_reads_caller_let() {
+        let src = "func f() {\n    return name\n}\nOnBoot => {\n    let name = \"湊\"\n    湊: ${f()}\n}";
+        let n = analyze_src_with_globals(src);
+        let n = free_var_notices(&n);
+        assert_eq!(n.len(), 1, "{:?}", n);
+        assert!(n[0].message.contains("\"name\""));
+    }
+
+    #[test]
+    fn test_free_var_params_only_no_notice() {
+        let src = "func add(a, b) {\n    return a + b\n}\nOnBoot => {\n    湊: ${add(1, 2)}\n}";
+        assert!(free_var_notices(&analyze_src_with_globals(src)).is_empty());
+    }
+
+    #[test]
+    fn test_free_var_used_before_let() {
+        let src = "OnBoot => {\n    湊: ${x}\n    let x = 1\n    湊: ${x}\n}";
+        let n = analyze_src_with_globals(src);
+        assert_eq!(free_var_notices(&n).len(), 1);
+    }
+
+    #[test]
+    fn test_free_var_let_in_if_not_visible_after() {
+        let src = "OnBoot => {\n    if (true) {\n        let x = 1\n    }\n    湊: ${x}\n}";
+        assert_eq!(free_var_notices(&analyze_src_with_globals(src)).len(), 1);
+    }
+
+    #[test]
+    fn test_free_var_global_read_without_keyword_no_notice() {
+        let src = "global 一覧 = [1, 2]\nOnBoot => {\n    global save.回数 += 1\n    湊: ${一覧[0]} ${save.回数}\n}\nOnClose => {\n    湊: ${save.回数}\n}";
+        assert!(free_var_notices(&analyze_src_with_globals(src)).is_empty());
+    }
+
+    #[test]
+    fn test_free_var_ambient_names_no_notice() {
+        let src = "func 時() {\n    return now.hour\n}\nOnBoot => {\n    湊: ${reference.0} ${時()} ${system.version}\n}";
+        assert!(free_var_notices(&analyze_src_with_globals(src)).is_empty());
+    }
+
+    #[test]
+    fn test_free_var_local_func_does_not_capture_outer_let() {
+        let src = "OnBoot => {\n    let x = 1\n    func g() {\n        return x\n    }\n    湊: ${g()}\n}";
+        assert_eq!(free_var_notices(&analyze_src_with_globals(src)).len(), 1);
+    }
+
+    #[test]
+    fn test_free_var_compound_assign_to_let_no_notice() {
+        // 行末の ; は文としては構文エラーになるので付けない
+        let src = "OnBoot=>{\nlet  hoge = 1\nhoge +=2\n}";
+        assert!(free_var_notices(&analyze_src_with_globals(src)).is_empty());
+    }
+
+    #[test]
+    fn test_free_var_assign_without_let_reported() {
+        let src = "func f() {\n    count += 1\n}\nOnBoot => {\n    f()\n}";
+        let n = analyze_src_with_globals(src);
+        let n = free_var_notices(&n);
+        assert!(n.iter().any(|d| d.message.contains("\"count\" への代入は")), "{:?}", n);
+    }
+
+    #[test]
+    fn test_free_var_reported_once_per_name() {
+        let src = "func f() {\n    湊: ${x}${x}\n    return x\n}\nOnBoot => {\n    湊: ${f()}\n}";
+        assert_eq!(free_var_notices(&analyze_src_with_globals(src)).len(), 1);
+    }
+
+    #[test]
+    fn test_free_var_loop_variables_no_notice() {
+        let src = "OnBoot => {\n    for (let i = 0; i < 3; i++) {\n        湊: ${i}\n    }\n    let items = [1, 2]
+    foreach items as k, v {\n        湊: ${k}${v}\n    }\n}";
+        assert!(free_var_notices(&analyze_src_with_globals(src)).is_empty());
+    }
+
+    #[test]
+    fn test_free_var_for_step_is_not_a_global_declaration() {
+        let src = "OnBoot => {\n    for (let i = 0; i < 3; i++) {\n    }\n}\nOnClose => {\n    湊: ${i}\n}";
+        assert_eq!(free_var_notices(&analyze_src_with_globals(src)).len(), 1);
     }
 }

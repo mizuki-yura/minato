@@ -467,6 +467,7 @@ let talk_names: HashSet<String> = talks.keys().cloned().collect();
 
 // 静的チェック（all_funcsをムーブする前に）
 let analyze_errors = Analyzer::new(talk_names, func_names)
+    .with_global_names(analyzer::top_global_names(&all_globals))
     .analyze(&talks, &all_funcs);
 
 let mut error_only: Vec<Diagnostic> = analyze_errors.iter()

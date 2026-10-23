@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::analyzer::Analyzer;
+use crate::analyzer::{Analyzer, top_global_names};
 use crate::diagnostic::{sort_diagnostics, Diagnostic, Level};
 use crate::parser::{load_program, AssignOp, Expr, LoadError, PathSegment, Spanned, Stmt, Talk};
 
@@ -66,7 +66,7 @@ fn run_load_program(main_mnt: &Path) -> LoadResult {
 pub fn check_ghost(master_dir: &Path) -> CheckResult {
     let main_mnt = master_dir.join("talks").join("main.mnt");
 
-    let (all_talks, all_funcs, _all_globals) = match run_load_program(&main_mnt) {
+    let (all_talks, all_funcs, all_globals) = match run_load_program(&main_mnt) {
         Ok(r) => r,
         Err(LoadError::PreprocessError(d)) => return CheckResult { diagnostics: vec![d], load_failed: true },
         Err(LoadError::ParseError(mut diags, _path)) => {
@@ -86,7 +86,9 @@ pub fn check_ghost(master_dir: &Path) -> CheckResult {
     }
     let talk_names: HashSet<String> = talks.keys().cloned().collect();
 
-    let mut diagnostics = Analyzer::new(talk_names, func_names).analyze(&talks, &all_funcs);
+    let mut diagnostics = Analyzer::new(talk_names, func_names)
+        .with_global_names(top_global_names(&all_globals))
+        .analyze(&talks, &all_funcs);
     sort_diagnostics(&mut diagnostics);
     CheckResult { diagnostics, load_failed: false }
 }
