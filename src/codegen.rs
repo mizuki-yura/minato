@@ -398,7 +398,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 
 fn map_values_equal(a: &IndexMap<String, Value>, b: &IndexMap<String, Value>) -> bool {
     a.len() == b.len()
-        && a.iter().all(|(k, v)| b.get(k).map_or(false, |bv| values_equal(v, bv)))
+        && a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
 }
 
 // DEBUG_LOG の近くに追加
@@ -473,7 +473,7 @@ fn validate_rel_path(p: &str) -> Result<Vec<String>, String> {
         ));
     }
     let mut segs: Vec<String> = Vec::new();
-    for seg in p.split(|c| c == '/' || c == '\\') {
+    for seg in p.split(['/', '\\']) {
         if seg.is_empty() || seg == "." { continue; }
         if seg == ".." {
             return Err(format!("「..」を含むパスは使えません: 「{}」", p));
@@ -679,11 +679,11 @@ pub fn to_zenkaku(s: &str) -> String {
 
 fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
     match name {
-        "floor" => Value::Number(vals.get(0).map(|v| v.as_number().floor()).unwrap_or(0.0)),
-        "ceil"  => Value::Number(vals.get(0).map(|v| v.as_number().ceil()).unwrap_or(0.0)),
-        "round" => Value::Number(vals.get(0).map(|v| v.as_number().round()).unwrap_or(0.0)),
-        "trunc" => Value::Number(vals.get(0).map(|v| v.as_number().trunc()).unwrap_or(0.0)),
-        "rand"  => match (vals.get(0), vals.get(1)) {
+        "floor" => Value::Number(vals.first().map(|v| v.as_number().floor()).unwrap_or(0.0)),
+        "ceil"  => Value::Number(vals.first().map(|v| v.as_number().ceil()).unwrap_or(0.0)),
+        "round" => Value::Number(vals.first().map(|v| v.as_number().round()).unwrap_or(0.0)),
+        "trunc" => Value::Number(vals.first().map(|v| v.as_number().trunc()).unwrap_or(0.0)),
+        "rand"  => match (vals.first(), vals.get(1)) {
             // rand(lo, hi): lo以上hi以下（両端を含む）。lo > hi なら入れ替える
             (Some(a), Some(b)) => {
                 let (mut lo, mut hi) = (a.as_number().round() as i64, b.as_number().round() as i64);
@@ -694,68 +694,68 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             }
             _ => Value::Number(simple_rand() as f64),
         },
-        "len" => match vals.get(0) {
+        "len" => match vals.first() {
             Some(Value::Str(s))   => Value::Number(s.chars().count() as f64),
             Some(Value::Array(a)) => Value::Number(a.len() as f64),
             Some(Value::Map(m))   => Value::Number(m.len() as f64),
             _                     => Value::Number(0.0),
         },
-        "abs" => Value::Number(vals.get(0).map(|v| v.as_number().abs()).unwrap_or(0.0)),
-        "min" => match (vals.get(0), vals.get(1)) {
+        "abs" => Value::Number(vals.first().map(|v| v.as_number().abs()).unwrap_or(0.0)),
+        "min" => match (vals.first(), vals.get(1)) {
             (Some(Value::Array(arr)), None) => arr.iter().map(|v| v.as_number()).reduce(f64::min).map(Value::Number).unwrap_or(Value::Null),
             (Some(a), Some(b)) => Value::Number(a.as_number().min(b.as_number())),
             (Some(a), None)    => Value::Number(a.as_number()),
             _                  => Value::Null,
         },
-        "max" => match (vals.get(0), vals.get(1)) {
+        "max" => match (vals.first(), vals.get(1)) {
             (Some(Value::Array(arr)), None) => arr.iter().map(|v| v.as_number()).reduce(f64::max).map(Value::Number).unwrap_or(Value::Null),
             (Some(a), Some(b)) => Value::Number(a.as_number().max(b.as_number())),
             (Some(a), None)    => Value::Number(a.as_number()),
             _                  => Value::Null,
         },
-        "clamp" => match (vals.get(0), vals.get(1), vals.get(2)) {
+        "clamp" => match (vals.first(), vals.get(1), vals.get(2)) {
             (Some(v), Some(lo), Some(hi)) =>
                 Value::Number(v.as_number().clamp(lo.as_number(), hi.as_number())),
             _ => Value::Null,
         },
-        "sin"   => Value::Number(vals.get(0).map(|v| v.as_number().sin()).unwrap_or(0.0)),
-        "cos"   => Value::Number(vals.get(0).map(|v| v.as_number().cos()).unwrap_or(0.0)),
-        "tan"   => Value::Number(vals.get(0).map(|v| v.as_number().tan()).unwrap_or(0.0)),
-        "asin"  => Value::Number(vals.get(0).map(|v| v.as_number().asin()).unwrap_or(0.0)),
-        "acos"  => Value::Number(vals.get(0).map(|v| v.as_number().acos()).unwrap_or(0.0)),
-        "atan2" => match (vals.get(0), vals.get(1)) {
+        "sin"   => Value::Number(vals.first().map(|v| v.as_number().sin()).unwrap_or(0.0)),
+        "cos"   => Value::Number(vals.first().map(|v| v.as_number().cos()).unwrap_or(0.0)),
+        "tan"   => Value::Number(vals.first().map(|v| v.as_number().tan()).unwrap_or(0.0)),
+        "asin"  => Value::Number(vals.first().map(|v| v.as_number().asin()).unwrap_or(0.0)),
+        "acos"  => Value::Number(vals.first().map(|v| v.as_number().acos()).unwrap_or(0.0)),
+        "atan2" => match (vals.first(), vals.get(1)) {
             (Some(y), Some(x)) => Value::Number(y.as_number().atan2(x.as_number())),
             _ => Value::Number(0.0),
         },
-        "pow" => match (vals.get(0), vals.get(1)) {
+        "pow" => match (vals.first(), vals.get(1)) {
             (Some(a), Some(b)) => Value::Number(a.as_number().powf(b.as_number())),
             _ => Value::Null,
         },
-        "sign" => Value::Number(match vals.get(0).map(|v| v.as_number()).unwrap_or(0.0) {
+        "sign" => Value::Number(match vals.first().map(|v| v.as_number()).unwrap_or(0.0) {
             n if n > 0.0 => 1.0,
             n if n < 0.0 => -1.0,
             _ => 0.0,
         }),
-        "exp"   => Value::Number(vals.get(0).map(|v| v.as_number().exp()).unwrap_or(1.0)),
+        "exp"   => Value::Number(vals.first().map(|v| v.as_number().exp()).unwrap_or(1.0)),
         // 0以下（とNaN）はNaNを返さず null にする
-        "ln"    => match vals.get(0).map(|v| v.as_number()) {
+        "ln"    => match vals.first().map(|v| v.as_number()) {
             Some(n) if n > 0.0 => Value::Number(n.ln()),
             _ => Value::Null,
         },
-        "log10" => match vals.get(0).map(|v| v.as_number()) {
+        "log10" => match vals.first().map(|v| v.as_number()) {
             Some(n) if n > 0.0 => Value::Number(n.log10()),
             _ => Value::Null,
         },
-        "sum" => match vals.get(0) {
+        "sum" => match vals.first() {
             Some(Value::Array(arr)) => Value::Number(arr.iter().map(|v| v.as_number()).sum()),
             _ => Value::Number(0.0),
         },
-        "sqrt"   => Value::Number(vals.get(0).map(|v| v.as_number().sqrt()).unwrap_or(0.0)),
+        "sqrt"   => Value::Number(vals.first().map(|v| v.as_number().sqrt()).unwrap_or(0.0)),
         "PI"     => Value::Number(std::f64::consts::PI),
-        "to_rad" => Value::Number(vals.get(0).map(|v| v.as_number().to_radians()).unwrap_or(0.0)),
-        "to_deg" => Value::Number(vals.get(0).map(|v| v.as_number().to_degrees()).unwrap_or(0.0)),
+        "to_rad" => Value::Number(vals.first().map(|v| v.as_number().to_radians()).unwrap_or(0.0)),
+        "to_deg" => Value::Number(vals.first().map(|v| v.as_number().to_degrees()).unwrap_or(0.0)),
         "to_hex" => {
-            let n = vals.get(0).map(|v| v.as_number() as i64).unwrap_or(0);
+            let n = vals.first().map(|v| v.as_number() as i64).unwrap_or(0);
             // as_number()はf64なので、辞書スクリプトが1e20のような巨大な値を
             // 渡すとusizeへのsaturatingキャストでusize::MAXになりうる。
             // format!のwidthに巨大な値を渡すとOOM即abortに直結するため
@@ -764,24 +764,24 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             if digits > 0 { Value::Str(format!("{:0>width$x}", n, width = digits)) }
             else          { Value::Str(format!("{:x}", n)) }
         }
-        "contains" => match (vals.get(0), vals.get(1)) {
+        "contains" => match (vals.first(), vals.get(1)) {
             (Some(v), Some(sub)) => Value::Bool(v.to_display().contains(sub.to_display().as_str())),
             _ => Value::Bool(false),
         },
-        "starts_with" => match (vals.get(0), vals.get(1)) {
+        "starts_with" => match (vals.first(), vals.get(1)) {
             (Some(v), Some(p)) => Value::Bool(v.to_display().starts_with(p.to_display().as_str())),
             _ => Value::Bool(false),
         },
-        "ends_with" => match (vals.get(0), vals.get(1)) {
+        "ends_with" => match (vals.first(), vals.get(1)) {
             (Some(v), Some(s)) => Value::Bool(v.to_display().ends_with(s.to_display().as_str())),
             _ => Value::Bool(false),
         },
-        "replace" => match (vals.get(0), vals.get(1), vals.get(2)) {
+        "replace" => match (vals.first(), vals.get(1), vals.get(2)) {
             (Some(s), Some(from), Some(to)) =>
                 Value::Str(s.to_display().replace(from.to_display().as_str(), to.to_display().as_str())),
             _ => Value::Null,
         },
-        "split" => match (vals.get(0), vals.get(1)) {
+        "split" => match (vals.first(), vals.get(1)) {
             (Some(s), Some(sep)) => {
                 let sep_s = sep.to_display();
                 let parts: Vec<Value> = if sep_s.is_empty() {
@@ -793,21 +793,21 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             }
             _ => Value::Array(vec![]),
         },
-        "regex_match" => match (vals.get(0), vals.get(1)) {
+        "regex_match" => match (vals.first(), vals.get(1)) {
             (Some(s), Some(pat)) => match Regex::new(&pat.to_display()) {
                 Ok(re) => Value::Bool(re.is_match(&s.to_display())),
                 Err(_) => Value::Bool(false),
             },
             _ => Value::Bool(false),
         },
-        "regex_find" => match (vals.get(0), vals.get(1)) {
+        "regex_find" => match (vals.first(), vals.get(1)) {
             (Some(s), Some(pat)) => match Regex::new(&pat.to_display()) {
                 Ok(re) => re.find(&s.to_display()).map(|m| Value::Str(m.as_str().to_string())).unwrap_or(Value::Null),
                 Err(_) => Value::Null,
             },
             _ => Value::Null,
         },
-        "regex_captures" => match (vals.get(0), vals.get(1)) {
+        "regex_captures" => match (vals.first(), vals.get(1)) {
             (Some(s), Some(pat)) => match Regex::new(&pat.to_display()) {
                 Ok(re) => match re.captures(&s.to_display()) {
                     Some(caps) => Value::Array(caps.iter().map(|m| match m {
@@ -820,36 +820,36 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             },
             _ => Value::Null,
         },
-        "regex_replace" => match (vals.get(0), vals.get(1), vals.get(2)) {
+        "regex_replace" => match (vals.first(), vals.get(1), vals.get(2)) {
             (Some(s), Some(pat), Some(rep)) => match Regex::new(&pat.to_display()) {
                 Ok(re) => Value::Str(re.replace_all(&s.to_display(), rep.to_display().as_str()).to_string()),
-                Err(_) => vals.get(0).cloned().unwrap_or(Value::Null),
+                Err(_) => vals.first().cloned().unwrap_or(Value::Null),
             },
             _ => Value::Null,
         },
-        "regex_split" => match (vals.get(0), vals.get(1)) {
+        "regex_split" => match (vals.first(), vals.get(1)) {
             (Some(s), Some(pat)) => match Regex::new(&pat.to_display()) {
                 Ok(re) => Value::Array(re.split(&s.to_display()).map(|p| Value::Str(p.to_string())).collect()),
-                Err(_) => Value::Array(vec![vals.get(0).cloned().unwrap_or(Value::Null)]),
+                Err(_) => Value::Array(vec![vals.first().cloned().unwrap_or(Value::Null)]),
             },
             _ => Value::Array(vec![]),
         },
-        "join" => match vals.get(0) {
+        "join" => match vals.first() {
             Some(Value::Array(arr)) => {
                 let sep = vals.get(1).map(|v| v.to_display()).unwrap_or_default();
                 Value::Str(arr.iter().map(|v| v.to_display()).collect::<Vec<_>>().join(&sep))
             }
             _ => Value::Str(String::new()),
         },
-        "trim"   => Value::Str(vals.get(0).map(|v| v.to_display().trim().to_string()).unwrap_or_default()),
-        "to_str" => Value::Str(vals.get(0).map(|v| v.to_display()).unwrap_or_default()),
-        "to_num" => Value::Number(vals.get(0).map(|v| v.as_number()).unwrap_or(0.0)),
-        "is_num"   => Value::Bool(matches!(vals.get(0), Some(Value::Number(_)))),
-        "is_str"   => Value::Bool(matches!(vals.get(0), Some(Value::Str(_)))),
-        "is_bool"  => Value::Bool(matches!(vals.get(0), Some(Value::Bool(_)))),
-        "is_array" => Value::Bool(matches!(vals.get(0), Some(Value::Array(_)))),
-        "is_map"   => Value::Bool(matches!(vals.get(0), Some(Value::Map(_)))),
-        "type_of"  => Value::Str(match vals.get(0).unwrap_or(&Value::Null) {
+        "trim"   => Value::Str(vals.first().map(|v| v.to_display().trim().to_string()).unwrap_or_default()),
+        "to_str" => Value::Str(vals.first().map(|v| v.to_display()).unwrap_or_default()),
+        "to_num" => Value::Number(vals.first().map(|v| v.as_number()).unwrap_or(0.0)),
+        "is_num"   => Value::Bool(matches!(vals.first(), Some(Value::Number(_)))),
+        "is_str"   => Value::Bool(matches!(vals.first(), Some(Value::Str(_)))),
+        "is_bool"  => Value::Bool(matches!(vals.first(), Some(Value::Bool(_)))),
+        "is_array" => Value::Bool(matches!(vals.first(), Some(Value::Array(_)))),
+        "is_map"   => Value::Bool(matches!(vals.first(), Some(Value::Map(_)))),
+        "type_of"  => Value::Str(match vals.first().unwrap_or(&Value::Null) {
             Value::Number(_) => "number",
             Value::Str(_)    => "string",
             Value::Bool(_)   => "bool",
@@ -857,18 +857,18 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             Value::Map(_)    => "map",
             Value::Null      => "null",
         }.to_string()),
-        "to_lower" => Value::Str(vals.get(0).map(|v| v.to_display().to_lowercase()).unwrap_or_default()),
-"to_upper" => Value::Str(vals.get(0).map(|v| v.to_display().to_uppercase()).unwrap_or_default()),
-        "to_hankaku" => Value::Str(vals.get(0).map(|v| to_hankaku(&v.to_display())).unwrap_or_default()),
-        "to_zenkaku" => Value::Str(vals.get(0).map(|v| to_zenkaku(&v.to_display())).unwrap_or_default()),
+        "to_lower" => Value::Str(vals.first().map(|v| v.to_display().to_lowercase()).unwrap_or_default()),
+"to_upper" => Value::Str(vals.first().map(|v| v.to_display().to_uppercase()).unwrap_or_default()),
+        "to_hankaku" => Value::Str(vals.first().map(|v| to_hankaku(&v.to_display())).unwrap_or_default()),
+        "to_zenkaku" => Value::Str(vals.first().map(|v| to_zenkaku(&v.to_display())).unwrap_or_default()),
         "chr" => {
-            let n = vals.get(0).map(|v| v.as_number() as u32).unwrap_or(0);
+            let n = vals.first().map(|v| v.as_number() as u32).unwrap_or(0);
             match char::from_u32(n) {
                 Some(c) => Value::Str(c.to_string()),
                 None    => Value::Str(String::new()),
             }
         }
- "index_of" => match (vals.get(0), vals.get(1)) {
+ "index_of" => match (vals.first(), vals.get(1)) {
     (Some(Value::Array(arr)), Some(target)) => {
         Value::Number(arr.iter().position(|v| values_equal(v, target)).map(|i| i as f64).unwrap_or(-1.0))
     }
@@ -878,15 +878,15 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
     }
     _ => Value::Number(-1.0),
 },
-        "first" => match vals.get(0) {
+        "first" => match vals.first() {
             Some(Value::Array(arr)) => arr.first().cloned().unwrap_or(Value::Null),
             _ => Value::Null,
         },
-        "last" => match vals.get(0) {
+        "last" => match vals.first() {
             Some(Value::Array(arr)) => arr.last().cloned().unwrap_or(Value::Null),
             _ => Value::Null,
         },
-        "push" => match vals.get(0) {
+        "push" => match vals.first() {
             Some(Value::Array(arr)) => {
                 let mut new = arr.clone();
                 if let Some(v) = vals.get(1) { new.push(v.clone()); }
@@ -894,11 +894,11 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             }
             _ => Value::Null,
         },
-        "pop" => match vals.get(0) {
+        "pop" => match vals.first() {
             Some(Value::Array(arr)) => { let mut new = arr.clone(); new.pop(); Value::Array(new) }
             _ => Value::Null,
         },
-        "slice" => match vals.get(0) {
+        "slice" => match vals.first() {
             Some(Value::Array(arr)) => {
                 let len = arr.len() as i64;
                 let start = vals.get(1).map(|v| v.as_number() as i64).unwrap_or(0);
@@ -911,19 +911,19 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             }
             _ => Value::Array(vec![]),
         },
-        "has_key" => match (vals.get(0), vals.get(1)) {
+        "has_key" => match (vals.first(), vals.get(1)) {
             (Some(Value::Map(map)), Some(key)) => Value::Bool(map.contains_key(&key.to_display())),
             _ => Value::Bool(false),
         },
-        "keys" => match vals.get(0) {
+        "keys" => match vals.first() {
             Some(Value::Map(map)) => Value::Array(map.keys().map(|k| Value::Str(k.clone())).collect()),
             _ => Value::Array(vec![]),
         },
-        "values" => match vals.get(0) {
+        "values" => match vals.first() {
             Some(Value::Map(map)) => Value::Array(map.values().cloned().collect()),
             _ => Value::Array(vec![]),
         },
-        "delete" => match (vals.get(0), vals.get(1)) {
+        "delete" => match (vals.first(), vals.get(1)) {
             (Some(Value::Map(map)), Some(key)) => {
                 let mut new = map.clone();
                 new.shift_remove(&key.to_display());
@@ -931,7 +931,7 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             }
             _ => Value::Null,
         },
-        "count" => match (vals.get(0), vals.get(1)) {
+        "count" => match (vals.first(), vals.get(1)) {
     (Some(Value::Str(s)), Some(sub)) => {
         let sub = sub.to_display();
         if sub.is_empty() { Value::Number(0.0) }
@@ -942,12 +942,12 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
     }
     _ => Value::Number(0.0),
 },
-        "sort" => match vals.get(0) {
+        "sort" => match vals.first() {
             Some(Value::Array(arr)) => {
                 let mode = vals.get(1).map(|v| v.to_display()).unwrap_or_default();
                 let mut new = arr.clone();
                 match mode.as_str() {
-                    "kana" => new.sort_by(|a, b| kana_key(a).cmp(&kana_key(b))),
+                    "kana" => new.sort_by_key(kana_key),
                     "desc" => new.sort_by(|a, b| match (a, b) {
                         (Value::Number(x), Value::Number(y)) => y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal),
                         _ => b.to_display().cmp(&a.to_display()),
@@ -961,11 +961,11 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             }
             _ => Value::Array(vec![]),
         },
-        "reverse" => match vals.get(0) {
+        "reverse" => match vals.first() {
             Some(Value::Array(arr)) => { let mut new = arr.clone(); new.reverse(); Value::Array(new) }
             _ => Value::Array(vec![]),
         },
-   "unique" => match vals.get(0) {
+   "unique" => match vals.first() {
     Some(Value::Array(arr)) => {
         let mut result: Vec<Value> = Vec::new();
         for v in arr {
@@ -978,7 +978,7 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
     _ => Value::Array(vec![]),
 },
         "get_property" => {
-            let name = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
+            let name = vals.first().map(|v| v.to_display()).unwrap_or_default();
             if name.is_empty() { Value::Str(String::new()) }
             else if !consume_external_call_budget(env) {
                 // ループ内でget_property/saoriを繰り返し呼ぶ台本が、
@@ -992,7 +992,7 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             }
             else { Value::Str(crate::sstp::get_property(&name)) }
         },
-        "substr" => match vals.get(0) {
+        "substr" => match vals.first() {
             Some(s) => {
                 let s = s.to_display();
                 let chars: Vec<char> = s.chars().collect();
@@ -1005,7 +1005,7 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             _ => Value::Str(String::new()),
         },
         "choose" => {
-            let cond = vals.get(0).map(|v| v.as_bool()).unwrap_or(false);
+            let cond = vals.first().map(|v| v.as_bool()).unwrap_or(false);
             if cond { vals.get(1).cloned().unwrap_or(Value::Null) }
             else    { vals.get(2).cloned().unwrap_or(Value::Null) }
         },
@@ -1013,7 +1013,7 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
         "get" => {
     // get(collection, index_or_key, default?) — 範囲外/未存在キーでも警告を出さず、
     // 見つからなければdefault（省略時はNull）を返す
-    match (vals.get(0), vals.get(1)) {
+    match (vals.first(), vals.get(1)) {
         (Some(Value::Array(arr)), Some(idx)) => {
             let i = idx.as_number();
             if i < 0.0 {
@@ -1736,7 +1736,7 @@ Expr::Call(fname, args) => {
     // こうしないと cond やsaori()/log()等の副作用が余計に発火したり、
     // 選ばれなかった側の式まで(discardされるとはいえ)一度評価されてしまう。
     if fname == "choose" {
-        let cond = args.get(0).map(|a| self.eval_expr_full(a).as_bool()).unwrap_or(false);
+        let cond = args.first().map(|a| self.eval_expr_full(a).as_bool()).unwrap_or(false);
         return if cond {
             args.get(1).map(|a| self.eval_expr_full(a)).unwrap_or(Value::Null)
         } else {
@@ -1767,10 +1767,7 @@ Expr::Call(fname, args) => {
                     append_log!(format!("enter talk (call): {}", talk.event));
                     let saved_scope = self.current_scope.take();
                     let saved_spoken = std::mem::take(&mut self.spoken_scopes);
-                    match self.run_stmts(&talk.body, &mut tmp_out) {
-                        Some(FlowControl::Return(val)) => { tmp_out.push_str(&val.to_display()); }
-                        _ => {}
-                    }
+                    if let Some(FlowControl::Return(val)) = self.run_stmts(&talk.body, &mut tmp_out) { tmp_out.push_str(&val.to_display()); }
                     self.current_scope = saved_scope;
                     self.spoken_scopes = saved_spoken;
                     self.env.pop_scope();
@@ -1910,7 +1907,7 @@ else {
 }
                         
 "is_null" => {
-    Value::Bool(matches!(vals.get(0).unwrap_or(&Value::Null), Value::Null))
+    Value::Bool(matches!(vals.first().unwrap_or(&Value::Null), Value::Null))
 }
 // eval_expr_full の Expr::Call の中、saori/choose/days_since と並べて追加
 "log" => {
@@ -1919,13 +1916,13 @@ else {
     Value::Null
 }
 "talk_exists" => {
-    let name = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
+    let name = vals.first().map(|v| v.to_display()).unwrap_or_default();
     Value::Bool(!name.is_empty() && (self.talks.contains_key(&name) || self.env.funcs.contains_key(&name)))
 }
 
 
     "file_read" => {
-    let p = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
+    let p = vals.first().map(|v| v.to_display()).unwrap_or_default();
     let enc = vals.get(1).map(|v| v.to_display().to_lowercase()).unwrap_or_default();
     let full = match self.resolve_file(&p, true) {
         Ok((f, _)) => f,
@@ -1962,7 +1959,7 @@ else {
 }
 
 "file_write" => {
-    let p = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
+    let p = vals.first().map(|v| v.to_display()).unwrap_or_default();
     let content = vals.get(1).map(|v| v.to_display()).unwrap_or_default();
     let enc = vals.get(2).map(|v| v.to_display().to_lowercase()).unwrap_or_default();
     let full = match self.resolve_writable(&p) {
@@ -1999,7 +1996,7 @@ else {
 }
 
 "file_append" => {
-    let p = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
+    let p = vals.first().map(|v| v.to_display()).unwrap_or_default();
     let content = vals.get(1).map(|v| v.to_display()).unwrap_or_default();
     let enc = vals.get(2).map(|v| v.to_display().to_lowercase()).unwrap_or_default();
     let full = match self.resolve_writable(&p) {
@@ -2030,7 +2027,7 @@ else {
 }
 
 "file_move" => {
-    let from_p = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
+    let from_p = vals.first().map(|v| v.to_display()).unwrap_or_default();
     let to_p   = vals.get(1).map(|v| v.to_display()).unwrap_or_default();
     let overwrite = vals.get(2).map(|v| v.as_bool()).unwrap_or(false);
 
@@ -2078,7 +2075,7 @@ else {
 // json_parse / json_stringifyは、失敗時のNullを正しいJSONのnullと
 // 区別できるようwarningを積む必要があるため、push_errが使えるここに置く。
 "json_parse" => {
-    match vals.get(0) {
+    match vals.first() {
         Some(Value::Str(s)) => match crate::json::parse(s) {
             Ok(v) => v,
             Err(msg) => { self.push_err("warning", msg); Value::Null }
@@ -2102,7 +2099,7 @@ else {
 }
 
 "json_stringify" => {
-    let v = vals.get(0).cloned().unwrap_or(Value::Null);
+    let v = vals.first().cloned().unwrap_or(Value::Null);
     let pretty = vals.get(1).map(|p| p.as_bool()).unwrap_or(false);
     match crate::json::stringify(&v, pretty) {
         Ok(s) => Value::Str(s),
@@ -2111,7 +2108,7 @@ else {
 }
 
 "format" => {
-    let fmt = vals.get(0).map(|v| v.to_display()).unwrap_or_default();
+    let fmt = vals.first().map(|v| v.to_display()).unwrap_or_default();
     let mut result = String::new();
     let mut args_iter = vals.iter().skip(1);
     let mut chars = fmt.chars().peekable();
@@ -2478,7 +2475,7 @@ fn resolve_file(&self, p: &str, must_exist: bool) -> Result<(PathBuf, Vec<String
 fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)> {
     let errors_before = self.errors.len();
     let alive: Vec<(usize, &Talk)> = candidates.iter().enumerate()
-        .filter(|(_, t)| t.cond.as_ref().map_or(true, |c| self.eval_expr_full(c).as_bool()))
+        .filter(|(_, t)| t.cond.as_ref().is_none_or(|c| self.eval_expr_full(c).as_bool()))
         .collect();
         // cond由来のnotice/warningは捨てるが、errorだけは残す。
     // saoriのロード失敗のような「実行時の値によらない台本の設定ミス」は、

@@ -293,7 +293,7 @@ pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
     unsafe { GlobalFree(h); }
 
     let response = response.unwrap_or_else(|e| {
-        let _msg = e.downcast_ref::<&str>().map(|s| *s)
+        let _msg = e.downcast_ref::<&str>().copied()
             .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))
             .unwrap_or("unknown panic");
         append_log!(format!("request: panic: {}", _msg));
@@ -426,7 +426,7 @@ let (all_talks, all_funcs, all_globals) = match load_program_guarded(&main) {
             virtual_time: None,
             parse_error: Some(msg),
             load_failed:true,
-           init_errors:  init_errors,
+           init_errors,
             talk_interval_secs: config.settings.talk_interval_secs,
             talk_jitter_secs: config.settings.talk_jitter_secs,
              hwnd: 0,
@@ -447,7 +447,7 @@ Err(LoadError::ParseError(diags, _err_path)) => {
         virtual_time: None,
         parse_error: Some(msg),
         load_failed:true,
-        init_errors: init_errors,
+        init_errors,
         talk_interval_secs: config.settings.talk_interval_secs,
         talk_jitter_secs: config.settings.talk_jitter_secs,
         hwnd: 0,
@@ -497,7 +497,7 @@ if !error_only.is_empty() {
         virtual_time: None,
         parse_error: Some(msg),
         load_failed:true,
-        init_errors: init_errors,
+        init_errors,
         talk_interval_secs: config.settings.talk_interval_secs,
         talk_jitter_secs: config.settings.talk_jitter_secs,
         hwnd: 0,
@@ -685,9 +685,7 @@ if state.parse_error.is_some() {
     // ランダムトーク判定
 let actual_event = if event == "OnMinuteChange" {
     // ↓先に仮想時刻取得を返す
-    let script = format!(
-        "\\![get,property,OnGotVirtualTime,system.year,system.month,system.day,system.hour,system.minute,system.second]\\e"
-    );
+    let script = "\\![get,property,OnGotVirtualTime,system.year,system.month,system.day,system.hour,system.minute,system.second]\\e".to_string();
     if parse_reference(req, 3) != "1" {
         return shiori_response(&script);
     }
@@ -768,7 +766,7 @@ if actual_event == "OnRandomTalk" || actual_event == "OnAITalk" {
     );
 }
 let mut errors: Vec<(String, String)> = std::mem::take(&mut state.init_errors);
-errors.extend(state.codegen.errors.drain(..));
+errors.append(&mut state.codegen.errors);
 
 // ↓ 追加: system.* の変更を STATE に即時反映
 if let Some(Value::Map(ref m)) = state.codegen.env.globals.get("system") {

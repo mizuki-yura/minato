@@ -470,14 +470,14 @@ fn interpolated_str<'a>(
         .then(
             just('.')
                 .ignore_then(ident())
-                .map(|k| Either::Left(k))
+                .map(Either::Left)
             .or(
                 just('[')
                     .ignore_then(ws())
                     .ignore_then(ex.clone())
                     .then_ignore(ws())
                     .then_ignore(just(']').labelled("文字列中の添字アクセスは「]」で閉じてください"))
-                    .map(|e| Either::Right(e))
+                    .map(Either::Right)
             )
             .repeated()
             .collect::<Vec<_>>()
@@ -1201,7 +1201,7 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
     Ok(PreprocessResult { src: out, line_map })
 }
 
-//// 文字列リテラルの外側にある { と } の数を数える
+/// 文字列リテラルの外側にある { と } の数を数える
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BraceKind { Block, Map }
 /// preprocessが一行をどう扱うか。
@@ -1254,9 +1254,8 @@ fn scan_braces(trimmed: &str, depth: &mut u32) -> Result<Vec<BraceEvent>, String
     while i < chars.len() {
         let c = chars[i];
         match c {
-            '/' if !in_double && !in_single && interp_depth == 0 => {
-                if chars.get(i + 1) == Some(&'/') { break; }
-            }
+            '/' if !in_double && !in_single && interp_depth == 0
+                && chars.get(i + 1) == Some(&'/') => { break; }
             '"' if !in_single && interp_depth == 0 => { in_double = !in_double; }
             '\'' if !in_double && interp_depth == 0 => { in_single = !in_single; }
             '$' if !in_double && !in_single && chars.get(i + 1) == Some(&'{') => {

@@ -125,7 +125,7 @@ struct LimitedWriter {
 impl std::io::Write for LimitedWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         if self.buf.len() + data.len() > self.limit {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "too large"));
+            return Err(std::io::Error::other("too large"));
         }
         self.buf.extend_from_slice(data);
         Ok(data.len())

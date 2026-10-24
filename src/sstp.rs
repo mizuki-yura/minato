@@ -60,7 +60,7 @@ fn sstp_execute_get_property(prop_name: &str, addr: &str) -> Option<String> {
     }
 
     let data = response.split("\r\n\r\n").nth(1)?;
-    let value = data.trim_end_matches(|c| c == '\r' || c == '\n').to_string();
+    let value = data.trim_end_matches(['\r', '\n']).to_string();
 
     if value.is_empty() { None } else { Some(value) }
 }
