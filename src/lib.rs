@@ -136,6 +136,8 @@ fn decode_request(bytes: &[u8]) -> String {
 // ② append_log 関数の直後に以下を追加
 // ═══════════════════════════════════════════════════════════
 
+// 呼び出し元はSSPで、ポインタの正しさはSSPが保証する。
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn loadu(h: HGLOBAL, len: c_long) -> i32 {
     append_log!(format!("loadu start"));
@@ -199,6 +201,8 @@ pub extern "C" fn loadu(h: HGLOBAL, len: c_long) -> i32 {
     })
 }
 
+// 呼び出し元はSSPで、ポインタの正しさはSSPが保証する。
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn load(h: HGLOBAL, len: c_long) -> i32 {
     append_log!(format!("load called"));
@@ -265,6 +269,8 @@ pub extern "C" fn unload() -> i32 {
         1
     }).unwrap_or(1)
 }
+// 呼び出し元はSSPで、ポインタの正しさはSSPが保証する。
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
     append_log!(format!("request called"));
@@ -273,17 +279,20 @@ pub extern "C" fn request(h: HGLOBAL, len: *mut c_long) -> HGLOBAL {
         return std::ptr::null_mut();
     }
     let response = std::panic::catch_unwind(|| {
-        unsafe {
+        // decode_requestは所有型のStringを返すため、hへの借用(bytes)は
+        // このクロージャの中で終わる。
+        let req_str = unsafe {
             let bytes = std::slice::from_raw_parts(h as *const u8, safe_len(*len));
-            let req_str = decode_request(bytes);
+            decode_request(bytes)
+        };
+        handle_request(&req_str) // ← GlobalFreeより先に処理を終わらせる
+    });
 
-            let result = handle_request(&req_str); // ← GlobalFreeより先に処理を終わらせる
+    // hの解放はcatch_unwindの外で1回だけ行う。handle_requestがパニックしても
+    // ここに来るため、SSPから受け取ったバッファがリークしない。
+    unsafe { GlobalFree(h); }
 
-            GlobalFree(h); // ← 解放はこの位置に移動
-
-            result
-        }
-    }).unwrap_or_else(|e| {
+    let response = response.unwrap_or_else(|e| {
         let _msg = e.downcast_ref::<&str>().map(|s| *s)
             .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))
             .unwrap_or("unknown panic");
