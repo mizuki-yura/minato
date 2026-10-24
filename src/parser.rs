@@ -158,6 +158,31 @@ fn keyword<'a>(kw: &'static str) -> impl Parser<'a, &'a str, &'a str, extra::Err
         .then_ignore(any().filter(|&c: &char| is_ident_char(c)).not())
 }
 
+/// `let 名前 += 値` のように、let に = 以外の代入演算子を書いた行なら、
+/// 直し方を添えたエラーメッセージを返す。
+fn let_compound_assign_hint(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("let")?;
+    if !rest.starts_with(char::is_whitespace) { return None; }
+    let rest = rest.trim_start();
+    let name_len = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
+    if name_len == 0 { return None; }
+    let (name, rest) = rest.split_at(name_len);
+    let rest = rest.trim_start();
+    let op = ["+=", "-=", "*=", "/=", "%=", "?="].into_iter().find(|op| rest.starts_with(op))?;
+    let value = rest[op.len()..].trim();
+    let value = if value.is_empty() { "値" } else { value };
+    let head = format!(
+        "認識できない文です: 「{line}」。let では {op} は使えません（let は新しい変数を作る文なので、= で最初の値を入れます）"
+    );
+    if op == "?=" {
+        // 作ったばかりの変数は必ずnullなので、?= は = と同じ意味になる
+        return Some(format!("{head}。「let {name} = {value}」と書いてください"));
+    }
+    Some(format!(
+        "{head}。新しく作るなら「let {name} = {value}」、作ってから計算するなら「let {name} = 最初の値」の次の行に「{name} {op} {value}」と書いてください"
+    ))
+}
+
 fn var_path<'a>() -> impl Parser<'a, &'a str, Vec<String>, extra::Err<Rich<'a, char>>> + Clone {
     ident()
         .separated_by(just('.'))
@@ -886,7 +911,9 @@ let expr_stmt = ident()
                 .collect::<String>()
                 .validate(|s, e, emitter| {
                     let name = s.trim();
-                    let msg = if !name.is_empty() && name.chars().all(is_ident_char) {
+                    let msg = if let Some(hint) = let_compound_assign_hint(name) {
+                        hint
+                    } else if !name.is_empty() && name.chars().all(is_ident_char) {
                         format!(
                             "認識できない文です: 「{0}」。関数やトークを呼び出すなら「{0}()」または「call {0}」、セリフなら「キャラ名: {0}」と書いてください",
                             name
@@ -2067,6 +2094,31 @@ fn unrecognized_stmt_message(line: &str) -> String {
     let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, &src, "main.mnt"));
     assert!(msg.contains("認識できない文です"), "{}", msg);
     msg
+}
+
+#[test]
+fn test_let_compound_assign_hints_fix() {
+    let msg = unrecognized_stmt_message("let  hoge += 2");
+    assert!(msg.contains("let では += は使えません"), "{}", msg);
+    assert!(msg.contains("「let hoge = 2」"), "{}", msg);
+    assert!(msg.contains("「hoge += 2」"), "{}", msg);
+}
+
+#[test]
+fn test_let_set_if_null_hints_plain_let() {
+    let msg = unrecognized_stmt_message("let 名前 ?= \"湊\"");
+    assert!(msg.contains("let では ?= は使えません"), "{}", msg);
+    assert!(msg.contains("「let 名前 = \"湊\"」"), "{}", msg);
+    assert!(!msg.contains("次の行"), "{}", msg);
+}
+
+#[test]
+fn test_let_prefixed_identifier_is_not_let_hint() {
+    // letter += 1 は let 文ではない（正しい代入なのでエラーにならない）
+    let src = "OnBoot => {\n    letter += 1\n}";
+    let pre = preprocess(src).expect("preprocess failed");
+    assert!(program_with_include().parse(&*pre.src).into_result().is_ok());
+    assert!(let_compound_assign_hint("letter += 1").is_none());
 }
 
 #[test]
