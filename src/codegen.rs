@@ -66,6 +66,10 @@ pub fn as_bool(&self) -> bool {
 
 // ── 実行環境 ─────────────────────────────────────────────
 
+/// 関数・トークの呼び出し先にも引き継ぐローカル変数。
+/// イベントごとに inject_talk_locals で入れる値なので、どこから呼ばれても同じ。
+const CALL_FRAME_INHERITED: &[&str] = &["reference", "now"];
+
 pub struct Env {
     pub globals: HashMap<String, Value>,
     locals: Vec<HashMap<String, Value>>,
@@ -90,6 +94,24 @@ impl Env {
             call_depth: 0,
             external_call_count: std::cell::Cell::new(0),
         }
+    }
+
+    /// 関数・トークを呼ぶときに、新しいローカル環境へ切り替える。
+    /// 戻り値は呼び出し元のローカル環境で、leave_call_frameで元に戻す。
+    /// 呼ばれた側から見えるのは、引数・自分のlet・globalと、
+    /// イベントごとの値（CALL_FRAME_INHERITED）だけで、呼び出し元のletは見えない。
+    pub fn enter_call_frame(&mut self) -> Vec<HashMap<String, Value>> {
+        let mut frame = HashMap::new();
+        for name in CALL_FRAME_INHERITED {
+            if let Some(v) = self.locals.iter().rev().find_map(|scope| scope.get(*name)) {
+                frame.insert(name.to_string(), v.clone());
+            }
+        }
+        std::mem::replace(&mut self.locals, vec![frame])
+    }
+
+    pub fn leave_call_frame(&mut self, saved: Vec<HashMap<String, Value>>) {
+        self.locals = saved;
     }
 
     fn push_scope(&mut self) { self.locals.push(HashMap::new()); }
@@ -1757,20 +1779,20 @@ Expr::Call(fname, args) => {
             return Value::Str(String::new());
         }
         self.env.call_depth += 1;
+        // 呼ばれたトークのcondも、呼び出し元のletが見えない環境で評価する
+        let saved_locals = self.env.enter_call_frame();
         let alive = self.filter_alive(&candidates);
 
         if !alive.is_empty() {
             match self.selector.select_alive(fname, &alive) {
                 Some(t) => {
                     let talk = t.clone();
-                    self.env.push_scope();
                     append_log!(format!("enter talk (call): {}", talk.event));
                     let saved_scope = self.current_scope.take();
                     let saved_spoken = std::mem::take(&mut self.spoken_scopes);
                     if let Some(FlowControl::Return(val)) = self.run_stmts(&talk.body, &mut tmp_out) { tmp_out.push_str(&val.to_display()); }
                     self.current_scope = saved_scope;
                     self.spoken_scopes = saved_spoken;
-                    self.env.pop_scope();
                 }
                 None => {
                     self.push_err("notice", format!("「{}()」の候補選択に失敗し、空文字列になりました", fname));
@@ -1779,6 +1801,7 @@ Expr::Call(fname, args) => {
                } else {
             self.push_err("notice", format!("「{}()」の候補が全てcondで除外され、空文字列になりました", fname));
         }
+        self.env.leave_call_frame(saved_locals);
         self.env.call_depth -= 1;
         
 
@@ -2496,17 +2519,17 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
         if self.env.call_depth > 100 { append_log!("call depth limit exceeded"); return Value::Null; }
         self.env.call_depth += 1;
         if let Some((params, body)) = self.env.funcs.get(name).cloned() {
-            self.env.push_scope();
+            let saved = self.env.enter_call_frame();
             for (param, val) in params.iter().zip(args) { self.env.set_local(param, val); }
             let mut out = String::new();
             for s in &body {
                 match self.gen_stmt(s, &mut out) {
-                    Some(FlowControl::Return(val)) => { self.env.pop_scope(); self.env.call_depth -= 1; return val; }
+                    Some(FlowControl::Return(val)) => { self.env.leave_call_frame(saved); self.env.call_depth -= 1; return val; }
                     Some(FlowControl::Break) | Some(FlowControl::Continue) => break,
                     None => {}
                 }
             }
-            self.env.pop_scope();
+            self.env.leave_call_frame(saved);
             self.env.call_depth -= 1;
             Value::Str(out)
         } else { self.env.call_depth -= 1; Value::Null }
@@ -2523,9 +2546,12 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
             return;
         }
         self.env.call_depth += 1;
+        // 呼ばれたトークのcondも、呼び出し元のletが見えない環境で評価する
+        let saved = self.env.enter_call_frame();
         let alive = self.filter_alive(&candidates);
 
         if alive.is_empty() {
+            self.env.leave_call_frame(saved);
             self.env.call_depth -= 1;
             // gen_event（SSPからのイベント）の全滅は時間帯cond等で
             // 日常的に起こる正常系だが、call は作者が「ここで喋る」と
@@ -2537,10 +2563,9 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
             Some(t) => {
                 let talk = t.clone();
                 append_log!(format!("enter talk (call): {}", talk.event));
-                self.env.push_scope();
 
                 let result = self.run_stmts(&talk.body, out);
-                self.env.pop_scope();
+                self.env.leave_call_frame(saved);
                 self.env.call_depth -= 1;
 
                 if let Some(FlowControl::Return(val)) = result {
@@ -2549,6 +2574,7 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
                 }
             }
             None => {
+                self.env.leave_call_frame(saved);
                 self.env.call_depth -= 1;
                 self.push_err("notice", format!("call「{}」の候補選択に失敗し、何も出力されませんでした", name));
             }
@@ -2559,12 +2585,12 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
     if self.env.call_depth > 100 { append_log!("call depth limit exceeded"); return; }
     self.env.call_depth += 1;
     if let Some((params, body)) = self.env.funcs.get(name).cloned() {
-        self.env.push_scope();
+        let saved = self.env.enter_call_frame();
         for (param, val) in params.iter().zip(args) { self.env.set_local(param, val); }
         if let Some(FlowControl::Return(val)) = self.run_stmts(&body, out) {
             out.push_str(&val.to_display());
         }
-        self.env.pop_scope();
+        self.env.leave_call_frame(saved);
     }
     self.env.call_depth -= 1;
 }
@@ -3388,6 +3414,103 @@ fn test_null_literal_is_not_shadowed_by_variable() {
     let talks = parse_talks(src);
     let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0true\\e");
+}
+
+// ---- 呼び出し先から呼び出し元のletは見えない ----
+
+#[test]
+fn test_func_cannot_read_caller_let() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    func f() {
+        return is_null(x)
+    }
+    let x = 1
+    湊: ${f()}
+}"#);
+    assert_eq!(out, "\\0true\\e");
+}
+
+#[test]
+fn test_func_assignment_does_not_overwrite_caller_let() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    func g() {
+        x = 99
+    }
+    let x = 1
+    g()
+    湊: ${x}
+}"#);
+    assert_eq!(out, "\\01\\e");
+}
+
+#[test]
+fn test_called_talk_cannot_read_caller_let() {
+    let (out, _) = run_boot_with_talks(r#"子 => {
+    湊: ${is_null(x)}
+}
+OnBoot => {
+    let x = 1
+    call 子
+}"#);
+    assert!(out.contains("true") && !out.contains("false"), "{}", out);
+}
+
+#[test]
+fn test_talk_called_in_expression_cannot_read_caller_let() {
+    let (out, _) = run_boot_with_talks(r#"子 => {
+    return is_null(x)
+}
+OnBoot => {
+    let x = 1
+    湊: ${子()}
+}"#);
+    assert_eq!(out, "\\0true\\e");
+}
+
+#[test]
+fn test_called_talk_cond_cannot_read_caller_let() {
+    // 呼び出し元のxが見えていれば1つ目も候補に入り、ランダムに「見えた」が出る
+    for _ in 0..20 {
+        let (out, _) = run_boot_with_talks(r#"子 if(x == 1) => {
+    湊: 見えた
+}
+子 => {
+    湊: 見えない
+}
+OnBoot => {
+    let x = 1
+    call 子
+}"#);
+        assert!(out.contains("見えない"), "{}", out);
+    }
+}
+
+#[test]
+fn test_func_can_read_reference_and_now() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    func 時() {
+        return now.時
+    }
+    func 参照ある() {
+        return is_map(reference)
+    }
+    湊: ${時() == now.時} ${参照ある()}
+}"#);
+    assert_eq!(out, "\\0true true\\e");
+}
+
+#[test]
+fn test_recursive_func_keeps_own_args() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    func fact(n) {
+        if (n <= 1) {
+            return 1
+        }
+        return n * fact(n - 1)
+    }
+    湊: ${fact(5)}
+}"#);
+    assert_eq!(out, "\\0120\\e");
 }
 
 #[test]

@@ -131,10 +131,10 @@ pub fn analyze(
 }
 
     // ---- 自由変数チェック ----
-    // 実行時、func/talkの呼び出しは呼び出し元のスコープの上に積まれるため、
-    // 引数・let・globalのどれでもない名前を読み書きすると、呼び出し元のletに
-    // 触ってしまう（呼び出し元に無ければ、読みはnull・書きはglobalの新規作成）。
-    // 依存している箇所を洗い出すため、そうした名前にnoticeを出す。
+    // func/talkの中から見えるのは、引数・自分のlet・globalと reference/now だけ。
+    // どれでもない名前を読むと null になり、let なしで代入するとglobalを新しく作る。
+    // 0.2系までは呼び出し元のletが見えていたので、それに頼っていた台本や
+    // 書き間違いを見つけるため、そうした名前にnoticeを出す。
 
     fn begin_free_var_check(&mut self, params: &[String]) {
         self.let_scopes = vec![params.iter().cloned().collect()];
@@ -159,7 +159,7 @@ pub fn analyze(
     fn fv_read(&mut self, at: Pos<'_>, name: &str) {
         if !self.is_bound(name) && self.reported_reads.insert(name.to_string()) {
             self.push_at(Level::Notice, at, format!(
-                "\"{}\" は引数・let・global のどれでもありません。呼び出し元の let を読んでいる可能性があります（セーブデータにだけ残る変数なら無視してください）",
+                "\"{}\" は引数・let・global のどれでもないので、null になります。呼び出し元の let は見えません（セーブデータにだけ残る変数なら無視してください）",
                 name
             ));
         }
@@ -168,7 +168,7 @@ pub fn analyze(
     fn fv_assign(&mut self, at: Pos<'_>, name: &str) {
         if !self.is_bound(name) && self.reported_assigns.insert(name.to_string()) {
             self.push_at(Level::Notice, at, format!(
-                "\"{}\" への代入は、呼び出し元の変数を書き換えるか、グローバル変数を新しく作ります（let か global を付けてください）",
+                "\"{}\" への代入は、グローバル変数を新しく作ります。呼び出し元の変数は書き換わりません（let か global を付けてください）",
                 name
             ));
         }
@@ -251,7 +251,7 @@ pub fn analyze(
             Stmt::Call(Expr::Call(_, args)) => {
                 for a in args { self.fv_expr(at, a); }
             }
-            // ローカル定義のfuncは外側のletを捕まえない（実行時に見えるのは呼び出し元）ので、
+            // ローカル定義のfuncは外側のletを捕まえないので、
             // 外側とは切り離し、引数だけを束縛として検査する
             Stmt::FuncDef { params, body, .. } => {
                 let outer_scopes = std::mem::take(&mut self.let_scopes);
