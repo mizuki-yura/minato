@@ -35,6 +35,8 @@ pub struct Diagnostic {
     pub context: Option<String>,
     pub message: String,
     pub hint: Option<String>,
+    /// 静的チェックのルールID（unused-variable など）。表示ではメッセージの後ろに付く。
+    pub rule: Option<&'static str>,
 }
 
 impl Diagnostic {
@@ -47,6 +49,7 @@ impl Diagnostic {
             context: None,
             message: message.into(),
             hint: None,
+            rule: None,
         }
     }
 
@@ -94,6 +97,19 @@ impl Diagnostic {
         self
     }
 
+    pub fn with_rule(mut self, rule: &'static str) -> Self {
+        self.rule = Some(rule);
+        self
+    }
+
+    /// 表示用のメッセージ。ルールIDがあれば「メッセージ [rule-id]」にする。
+    pub fn display_message(&self) -> String {
+        match self.rule {
+            Some(r) => format!("{} [{}]", self.message, r),
+            None => self.message.clone(),
+        }
+    }
+
     pub fn line(&self) -> Option<u32> {
         self.line
     }
@@ -121,7 +137,7 @@ pub fn render_legacy(d: &Diagnostic) -> String {
         (Some(f), None) => s.push_str(&format!("{}: ", f)),
         (None, None) => {}
     }
-    s.push_str(&d.message);
+    s.push_str(&d.display_message());
     if let Some(h) = &d.hint {
         s.push(' ');
         s.push_str(h);
@@ -150,8 +166,8 @@ pub fn location(d: &Diagnostic) -> Option<String> {
 /// 例: 「main.mntの4行目（OnBoot内）: メッセージ ヒント: …」
 pub fn render_header(d: &Diagnostic) -> String {
     let mut s = match location(d) {
-        Some(loc) => format!("{}: {}", loc, d.message),
-        None => d.message.clone(),
+        Some(loc) => format!("{}: {}", loc, d.display_message()),
+        None => d.display_message(),
     };
     if let Some(h) = &d.hint {
         s.push_str(" ヒント: ");
@@ -169,6 +185,7 @@ fn escape_sakura(s: &str) -> String {
 /// バルーン本文向け（さくらスクリプト）。
 /// プロポーショナルフォントで読まれるため桁揃えや下線には頼らず、
 /// 位置とメッセージを1行、ヒントがあれば次の行に置く。
+/// ルールIDは短く読ませたいバルーンには出さない（minato_checkとログで見られる）。
 pub fn render_balloon(d: &Diagnostic) -> String {
     let mut s = match location(d) {
         Some(loc) => format!("{}: {}", escape_sakura(&loc), escape_sakura(&d.message)),

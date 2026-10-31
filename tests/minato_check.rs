@@ -87,7 +87,7 @@ fn test_break_outside_loop_reports_error_and_exits_one() {
     );
     assert_eq!(
         stderr.trim_end(),
-        "[error] main.mntの2行目（OnBoot内）: ループの外で break を使っています",
+        "[error] main.mntの2行目（OnBoot内）: ループの外で break を使っています [loop-control-outside-loop]",
         "ループ外breakのerrorが期待通り出ていない"
     );
 }

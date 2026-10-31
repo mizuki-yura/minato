@@ -28,11 +28,31 @@ pub struct Analyzer<'a> {
     current_context: &'a str,
     /// globalとして宣言された名前（パスの先頭）。トップレベル＋talk/func内のglobal文
     global_names: HashSet<String>,
-    /// 自由変数チェック用のletスコープ（内側が末尾）
-    let_scopes: Vec<HashSet<String>>,
+    /// 変数チェック用のスコープ（内側が末尾）。名前ごとに宣言位置と読み書きを記録する
+    let_scopes: Vec<HashMap<String, Binding>>,
     /// 自由変数チェックで報告済みの名前（talk/funcごとにリセット）
     reported_reads: HashSet<String>,
     reported_assigns: HashSet<String>,
+}
+
+/// スコープ内の変数1つ分の記録。未使用・書くだけの変数の検出に使う。
+struct Binding {
+    /// let で作った変数か（引数・ループ変数は未使用でも報告しない）
+    is_let: bool,
+    file: String,
+    line: u32,
+    read: bool,
+    written: bool,
+}
+
+/// 静的チェックのルールID。表示とドキュメントで使う。
+pub mod rule {
+    pub const FREE_VARIABLE: &str = "free-variable";
+    pub const UNUSED_VARIABLE: &str = "unused-variable";
+    pub const WRITE_ONLY_VARIABLE: &str = "write-only-variable";
+    pub const UNREACHABLE_CODE: &str = "unreachable-code";
+    pub const UNDEFINED_CALL: &str = "undefined-call";
+    pub const LOOP_CONTROL_OUTSIDE_LOOP: &str = "loop-control-outside-loop";
 }
 
 /// 処理系が用意する変数。引数・let・globalのどれでもなくても読める。
@@ -113,6 +133,7 @@ pub fn analyze(
                 self.fv_expr(Pos { file: &talk.file, line: talk.cond_line }, cond);
             }
             self.fv_stmts(&talk.body);
+            self.end_free_var_check();
             for name in &local_funcs { self.func_names.remove(name); }
         }
     }
@@ -125,6 +146,7 @@ pub fn analyze(
         self.check_stmts(body);
         self.begin_free_var_check(params);
         self.fv_stmts(body);
+        self.end_free_var_check();
         for n in &local_funcs { self.func_names.remove(n); }
     }
     self.errors
@@ -137,28 +159,89 @@ pub fn analyze(
     // 書き間違いを見つけるため、そうした名前にnoticeを出す。
 
     fn begin_free_var_check(&mut self, params: &[String]) {
-        self.let_scopes = vec![params.iter().cloned().collect()];
+        self.let_scopes = vec![HashMap::new()];
+        for p in params { self.declare_other(p); }
         self.reported_reads.clear();
         self.reported_assigns.clear();
     }
 
+    /// talk/funcの検査の終わりに、残っているスコープをすべて閉じる。
+    fn end_free_var_check(&mut self) {
+        while !self.let_scopes.is_empty() { self.pop_let_scope(); }
+    }
+
+    fn push_let_scope(&mut self) {
+        self.let_scopes.push(HashMap::new());
+    }
+
+    /// スコープを閉じ、その中で let した変数のうち読まれなかったものを報告する。
+    fn pop_let_scope(&mut self) {
+        if let Some(scope) = self.let_scopes.pop() {
+            let mut names: Vec<(String, Binding)> = scope.into_iter().collect();
+            // HashMapの順序は非決定的なので、宣言位置で並べて報告順を安定させる
+            names.sort_by(|a, b| (&a.1.file, a.1.line, &a.0).cmp(&(&b.1.file, b.1.line, &b.0)));
+            for (name, b) in names { self.report_unread(&name, &b); }
+        }
+    }
+
+    fn report_unread(&mut self, name: &str, b: &Binding) {
+        if !b.is_let || b.read || name.starts_with('_') { return; }
+        let at = Pos { file: &b.file, line: b.line };
+        let (rule_id, msg) = if b.written {
+            (rule::WRITE_ONLY_VARIABLE, format!(
+                "\"{}\" に値を入れていますが、一度も読んでいません（要らないなら消すか、名前を _ で始めてください）",
+                name
+            ))
+        } else {
+            (rule::UNUSED_VARIABLE, format!(
+                "\"{}\" は let で作られていますが、一度も使われていません（要らないなら消すか、名前を _ で始めてください）",
+                name
+            ))
+        };
+        // Posは&strを借りるので、bを借りたままpush_atを呼べるよう値を作ってから渡す
+        let diag = Diagnostic::new(Level::Notice, msg)
+            .in_file(at.file)
+            .at(at.line)
+            .with_context(self.current_context)
+            .with_rule(rule_id);
+        self.errors.push(diag);
+    }
+
+    /// nameが見えている一番内側の記録。
+    fn binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.let_scopes.iter_mut().rev().find_map(|s| s.get_mut(name))
+    }
+
     fn is_bound(&self, name: &str) -> bool {
-        self.let_scopes.iter().any(|s| s.contains(name))
+        self.let_scopes.iter().any(|s| s.contains_key(name))
             || self.global_names.contains(name)
             || AMBIENT_NAMES.contains(&name)
             || self.func_names.contains(name)
             || self.talk_names.contains(name)
     }
 
-    fn declare(&mut self, name: &str) {
+    /// let で変数を作る。同じスコープで同じ名前をもう一度 let したときは、
+    /// 前の変数はそこで見えなくなるので、読まれていなければここで報告する。
+    fn declare_let(&mut self, at: Pos<'_>, name: &str) {
+        let binding = Binding { is_let: true, file: at.file.to_string(), line: at.line, read: false, written: false };
+        let prev = self.let_scopes.last_mut().and_then(|s| s.insert(name.to_string(), binding));
+        if let Some(prev) = prev { self.report_unread(name, &prev); }
+    }
+
+    /// 引数・ループ変数。未使用でも報告しない。
+    fn declare_other(&mut self, name: &str) {
         if let Some(scope) = self.let_scopes.last_mut() {
-            scope.insert(name.to_string());
+            scope.insert(name.to_string(), Binding { is_let: false, file: String::new(), line: 0, read: false, written: false });
         }
     }
 
     fn fv_read(&mut self, at: Pos<'_>, name: &str) {
+        if let Some(b) = self.binding_mut(name) {
+            b.read = true;
+            return;
+        }
         if !self.is_bound(name) && self.reported_reads.insert(name.to_string()) {
-            self.push_at(Level::Notice, at, format!(
+            self.push_at(Level::Notice, rule::FREE_VARIABLE, at, format!(
                 "\"{}\" は引数・let・global のどれでもないので、null になります。呼び出し元の let は見えません（セーブデータにだけ残る変数なら無視してください）",
                 name
             ));
@@ -166,8 +249,12 @@ pub fn analyze(
     }
 
     fn fv_assign(&mut self, at: Pos<'_>, name: &str) {
+        if let Some(b) = self.binding_mut(name) {
+            b.written = true;
+            return;
+        }
         if !self.is_bound(name) && self.reported_assigns.insert(name.to_string()) {
-            self.push_at(Level::Notice, at, format!(
+            self.push_at(Level::Notice, rule::FREE_VARIABLE, at, format!(
                 "\"{}\" への代入は、グローバル変数を新しく作ります。呼び出し元の変数は書き換わりません（let か global を付けてください）",
                 name
             ));
@@ -182,9 +269,9 @@ pub fn analyze(
 
     /// 実行時と同じく新しいletスコープを積んで文リストを検査する。
     fn fv_scoped(&mut self, stmts: &[Spanned<Stmt>]) {
-        self.let_scopes.push(HashSet::new());
+        self.push_let_scope();
         self.fv_stmts(stmts);
-        self.let_scopes.pop();
+        self.pop_let_scope();
     }
 
     fn fv_path_indices(&mut self, at: Pos<'_>, path: &[PathSegment]) {
@@ -200,7 +287,7 @@ pub fn analyze(
             // 右辺は束縛より先に評価される（let x = x + 1 の右辺のxは外側のx）
             Stmt::Let(name, e) => {
                 self.fv_expr(at, e);
-                self.declare(name);
+                self.declare_let(at, name);
             }
             Stmt::Global(path, _, e) => {
                 self.fv_path_indices(at, path);
@@ -222,20 +309,20 @@ pub fn analyze(
             }
             // initのletはループ全体を囲むスコープに入る
             Stmt::For { init, cond, step, body } => {
-                self.let_scopes.push(HashSet::new());
+                self.push_let_scope();
                 self.fv_stmt(at, init);
                 self.fv_expr(at, cond);
                 self.fv_scoped(body);
                 self.fv_for_step(at, step);
-                self.let_scopes.pop();
+                self.pop_let_scope();
             }
             Stmt::ForEach { collection, key, value, body } => {
                 self.fv_expr(at, collection);
-                self.let_scopes.push(HashSet::new());
-                self.declare(key);
-                if let Some(v) = value { self.declare(v); }
+                self.push_let_scope();
+                self.declare_other(key);
+                if let Some(v) = value { self.declare_other(v); }
                 self.fv_stmts(body);
-                self.let_scopes.pop();
+                self.pop_let_scope();
             }
             Stmt::Match { expr, arms } => {
                 self.fv_expr(at, expr);
@@ -247,9 +334,15 @@ pub fn analyze(
                 }
             }
             Stmt::Return(e) => self.fv_expr(at, e),
-            // call hoge / call reference.0 の名前は変数の読みとしては扱わない
             Stmt::Call(Expr::Call(_, args)) => {
                 for a in args { self.fv_expr(at, a); }
+            }
+            // call 名前 の名前はふつうトーク名なので、自由変数としては報告しない。
+            // ただし let した変数なら、その値をトーク名に使う動的callなので読みとして数える
+            Stmt::Call(Expr::Var(path)) => {
+                if let Some(b) = path.first().and_then(|head| self.binding_mut(head)) {
+                    b.read = true;
+                }
             }
             // ローカル定義のfuncは外側のletを捕まえないので、
             // 外側とは切り離し、引数だけを束縛として検査する
@@ -259,6 +352,7 @@ pub fn analyze(
                 let outer_assigns = std::mem::take(&mut self.reported_assigns);
                 self.begin_free_var_check(params);
                 self.fv_stmts(body);
+                self.end_free_var_check();
                 self.let_scopes = outer_scopes;
                 self.reported_reads = outer_reads;
                 self.reported_assigns = outer_assigns;
@@ -323,22 +417,38 @@ pub fn analyze(
         }
     }
 
-    fn push(&mut self, level: Level, spanned: &Spanned<Stmt>, message: impl Into<String>) {
-        self.push_at(level, Pos::of(spanned), message);
+    fn push(&mut self, level: Level, rule: &'static str, spanned: &Spanned<Stmt>, message: impl Into<String>) {
+        self.push_at(level, rule, Pos::of(spanned), message);
     }
 
-    fn push_at(&mut self, level: Level, at: Pos<'_>, message: impl Into<String>) {
+    fn push_at(&mut self, level: Level, rule: &'static str, at: Pos<'_>, message: impl Into<String>) {
         self.errors.push(
             Diagnostic::new(level, message)
                 .in_file(at.file)
                 .at(at.line)
-                .with_context(self.current_context),
+                .with_context(self.current_context)
+                .with_rule(rule),
         );
     }
 
     fn check_stmts(&mut self, stmts: &[Spanned<Stmt>]) {
+        // return/break/continue より後ろの文は実行されない。ブロックごとに最初の1文だけ報告する
+        let mut jumped_by: Option<&str> = None;
         for spanned in stmts {
+            if let Some(kw) = jumped_by.take() {
+                self.push(Level::Warning, rule::UNREACHABLE_CODE, spanned, format!(
+                    "この行は {} より後ろにあるので、実行されません", kw
+                ));
+            }
             self.check_stmt(spanned);
+            if jumped_by.is_none() {
+                jumped_by = match spanned.node {
+                    Stmt::Return(_) => Some("return"),
+                    Stmt::Break => Some("break"),
+                    Stmt::Continue => Some("continue"),
+                    _ => None,
+                };
+            }
         }
     }
 
@@ -391,7 +501,7 @@ pub fn analyze(
             && !self.talk_names.contains(name)
             && !self.func_names.contains(name)
         {
-            self.push_at(Level::Notice, at, format!(
+            self.push_at(Level::Notice, rule::UNDEFINED_CALL, at, format!(
                     "\"{}\" は未定義です（ビルトイン関数でも talk でも func でもありません）",
                     name
                 ));
@@ -438,12 +548,12 @@ pub fn analyze(
         match stmt {
             Stmt::Break => {
                 if self.loop_depth == 0 {
-                    self.push(Level::Error, spanned, "ループの外で break を使っています".to_string());
+                    self.push(Level::Error, rule::LOOP_CONTROL_OUTSIDE_LOOP, spanned, "ループの外で break を使っています".to_string());
                 }
             }
             Stmt::Continue => {
                 if self.loop_depth == 0 {
-                    self.push(Level::Error, spanned, "ループの外で continue を使っています".to_string());
+                    self.push(Level::Error, rule::LOOP_CONTROL_OUTSIDE_LOOP, spanned, "ループの外で continue を使っています".to_string());
                 }
             }
            Stmt::Return(_) => {
@@ -455,7 +565,7 @@ Stmt::Call(expr) => {
         Expr::Var(path) if path.len() == 1 => {
             let name = &path[0];
             if !self.talk_names.contains(name) && !self.func_names.contains(name) {
-                self.push(Level::Notice, spanned, format!(
+                self.push(Level::Notice, rule::UNDEFINED_CALL, spanned, format!(
                         "\"{}\" は未定義です（動的callなら無視してください）",
                         name
                     ));
@@ -470,7 +580,7 @@ Stmt::Call(expr) => {
             if !self.talk_names.contains(&joined) {
                 let prefix = format!("{}.", path[0]);
                 if self.talk_names.iter().any(|n| n.starts_with(&prefix)) {
-                    self.push(Level::Notice, spanned, format!(
+                    self.push(Level::Notice, rule::UNDEFINED_CALL, spanned, format!(
                             "\"{}\" は未定義です（同じ「{}」で始まるトークはありますが、この名前はありません）",
                             joined, prefix
                         ));
@@ -1171,5 +1281,99 @@ OnBoot => {
     湊: ${f()}${null}
 }";
         assert!(free_var_notices(&analyze_src_with_globals(src)).is_empty());
+    }
+
+    // ---- 未使用・書くだけの変数、到達しないコード ----
+
+    fn by_rule<'d>(errors: &'d [Diagnostic], r: &str) -> Vec<&'d Diagnostic> {
+        errors.iter().filter(|e| e.rule == Some(r)).collect()
+    }
+
+    #[test]
+    fn test_unused_let_reported() {
+        let d = analyze_src_with_globals("OnBoot => {\n    let x = 1\n    湊: こんにちは\n}");
+        let u = by_rule(&d, rule::UNUSED_VARIABLE);
+        assert_eq!(u.len(), 1, "{:?}", d);
+        assert_eq!(u[0].line(), Some(2));
+        assert_eq!(u[0].level, Level::Notice);
+    }
+
+    #[test]
+    fn test_used_let_not_reported() {
+        let d = analyze_src_with_globals("OnBoot => {\n    let x = 1\n    湊: ${x}\n}");
+        assert!(by_rule(&d, rule::UNUSED_VARIABLE).is_empty(), "{:?}", d);
+        assert!(by_rule(&d, rule::WRITE_ONLY_VARIABLE).is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn test_underscore_let_not_reported() {
+        let d = analyze_src_with_globals("OnBoot => {\n    let _ok = f()\n    hoge()\n}\nfunc f() {\n    return 1\n}\nfunc hoge() {\n    return 1\n}");
+        assert!(by_rule(&d, rule::UNUSED_VARIABLE).is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn test_write_only_let_reported() {
+        let d = analyze_src_with_globals("OnBoot=>{\nlet  hoge = 1\nhoge +=2\n}");
+        let w = by_rule(&d, rule::WRITE_ONLY_VARIABLE);
+        assert_eq!(w.len(), 1, "{:?}", d);
+        assert_eq!(w[0].line(), Some(2));
+        assert!(by_rule(&d, rule::UNUSED_VARIABLE).is_empty());
+    }
+
+    #[test]
+    fn test_let_read_in_nested_block_is_used() {
+        let d = analyze_src_with_globals("OnBoot => {\n    let n = 0\n    while (n < 3) {\n        n += 1\n    }\n}");
+        assert!(by_rule(&d, rule::WRITE_ONLY_VARIABLE).is_empty(), "{:?}", d);
+        assert!(by_rule(&d, rule::UNUSED_VARIABLE).is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn test_redeclared_let_reports_first_unread() {
+        let d = analyze_src_with_globals("OnBoot => {\n    let x = 1\n    let x = 2\n    湊: ${x}\n}");
+        let u = by_rule(&d, rule::UNUSED_VARIABLE);
+        assert_eq!(u.len(), 1, "{:?}", d);
+        assert_eq!(u[0].line(), Some(2));
+    }
+
+    #[test]
+    fn test_params_and_loop_vars_not_reported() {
+        let d = analyze_src_with_globals("func f(a, b) {\n    return a\n}\nOnBoot => {\n    let items = [1]\n    foreach items as i, v {\n        湊: あ\n    }\n    湊: ${f(1, 2)}\n}");
+        assert!(by_rule(&d, rule::UNUSED_VARIABLE).is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn test_let_used_as_dynamic_call_target_is_used() {
+        let d = analyze_src_with_globals("挨拶 => {\n    湊: やあ\n}\nOnBoot => {\n    let 先 = \"挨拶\"\n    call 先\n}");
+        assert!(by_rule(&d, rule::UNUSED_VARIABLE).is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn test_unused_let_in_local_func_reported_once() {
+        let d = analyze_src_with_globals("OnBoot => {\n    func g() {\n        let t = 1\n        return 0\n    }\n    湊: ${g()}\n}");
+        assert_eq!(by_rule(&d, rule::UNUSED_VARIABLE).len(), 1, "{:?}", d);
+    }
+
+    #[test]
+    fn test_unreachable_after_return_is_warning() {
+        let d = analyze_src_with_globals("func f() {\n    return 1\n    湊: 届かない\n    湊: これも\n}\nOnBoot => {\n    湊: ${f()}\n}");
+        let u = by_rule(&d, rule::UNREACHABLE_CODE);
+        assert_eq!(u.len(), 1, "{:?}", d);
+        assert_eq!(u[0].line(), Some(3));
+        assert_eq!(u[0].level, Level::Warning);
+        assert!(u[0].message.contains("return"));
+    }
+
+    #[test]
+    fn test_unreachable_after_break_in_loop() {
+        let d = analyze_src_with_globals("OnBoot => {\n    while (true) {\n        break\n        湊: 届かない\n    }\n    湊: 届く\n}");
+        let u = by_rule(&d, rule::UNREACHABLE_CODE);
+        assert_eq!(u.len(), 1, "{:?}", d);
+        assert_eq!(u[0].line(), Some(4));
+    }
+
+    #[test]
+    fn test_return_in_if_does_not_make_rest_unreachable() {
+        let d = analyze_src_with_globals("OnBoot => {\n    if (true) {\n        return\n    }\n    湊: 届く\n}");
+        assert!(by_rule(&d, rule::UNREACHABLE_CODE).is_empty(), "{:?}", d);
     }
 }

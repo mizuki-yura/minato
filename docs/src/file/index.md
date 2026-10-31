@@ -116,11 +116,12 @@ func dict_words(cat) {
 }
 ```
 
-使う側では、戻り値がセリフに出ないように変数で受けます。
+使う側では、戻り値がセリフに出ないように `let _ =` で受けます。
+名前を `_` で始めた変数は、使わなくても静的チェックのお知らせ（[unused-variable](../error/common.md#使っていない変数)）が出ません。
 
 ```
 OnBoot => {
-    let loaded = dict_load()
+    let _ = dict_load()
     うきわ君: ${dict_word("挨拶")}
 }
 ```

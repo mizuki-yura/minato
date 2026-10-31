@@ -242,7 +242,7 @@ fn diagnostic_row(ui: &mut egui::Ui, d: &Diagnostic) {
                     ui.weak(format!("（{}内）", ctx));
                 }
             });
-            ui.label(&d.message);
+            ui.label(d.display_message());
             if let Some(h) = &d.hint {
                 ui.label(RichText::new(format!("ヒント: {}", h)).italics());
             }

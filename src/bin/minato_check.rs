@@ -71,8 +71,8 @@ fn print_diagnostic(d: &Diagnostic, sources: &mut SourceFiles, color: bool) {
         Level::Notice => ReportKind::Custom("notice", Color::Cyan),
     };
     let title = match location(d) {
-        Some(loc) => format!("{}: {}", loc, d.message),
-        None => d.message.clone(),
+        Some(loc) => format!("{}: {}", loc, d.display_message()),
+        None => d.display_message(),
     };
     let span = (file.to_string(), start..start + 1);
     let mut report = Report::build(kind, span.clone())

@@ -1982,7 +1982,8 @@ fn test_balloon_analyze_error_shows_context() {
     let state = init_with_main("OnBoot => {\n    break\n}\n", &[]);
     let (body, desc) = boot_error_parts(state);
     assert_eq!(body, "\\b[2]\\0パースエラー:\\nmain.mntの2行目（OnBoot内）: ループの外で break を使っています\\e");
-    assert_eq!(desc, "main.mntの2行目（OnBoot内）: ループの外で break を使っています");
+    // ルールIDはバルーンには出さず、SSPのエラーログ（ErrorDescription）にだけ出す
+    assert_eq!(desc, "main.mntの2行目（OnBoot内）: ループの外で break を使っています [loop-control-outside-loop]");
 }
 
 #[test]
