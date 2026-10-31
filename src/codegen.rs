@@ -3404,18 +3404,6 @@ fn test_null_literal() {
     assert_eq!(out, "\\0true 代替\\e");
 }
 
-#[test]
-fn test_null_literal_is_not_shadowed_by_variable() {
-    // null は変数ではなくリテラルなので、同名の let があっても null のまま
-    let src = r#"OnBoot => {
-    let null = 1
-    湊: ${is_null(null)}
-}"#;
-    let talks = parse_talks(src);
-    let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
-    assert_eq!(out, "\\0true\\e");
-}
-
 // ---- 呼び出し先から呼び出し元のletは見えない ----
 
 #[test]

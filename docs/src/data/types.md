@@ -69,6 +69,9 @@ let 開始 = get(work ?? {}, "区間開始", null)
 湊: ${save.未定義 ?? "初期値"}
 ```
 
+`null`・`true`・`false` は値を表す予約語なので、`let`・`global`・`func`・`foreach` などで変数名・関数名・引数名に使うとエラーになります。
+`data.true` や `{"null": 1}` のように、マップのキーとしては使えます。`nullable` のように予約語で始まる名前も使えます。
+
 ## 型の判定
 
 `is_num`・`is_str`・`is_bool`・`is_array`・`is_map`・`is_null` で値の型を確かめられます。

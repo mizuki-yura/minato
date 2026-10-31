@@ -158,6 +158,24 @@ fn keyword<'a>(kw: &'static str) -> impl Parser<'a, &'a str, &'a str, extra::Err
         .then_ignore(any().filter(|&c: &char| is_ident_char(c)).not())
 }
 
+/// 値を表すキーワード。式の中ではリテラルとして読むので、変数名・関数名にはできない。
+const RESERVED_VALUE_WORDS: &[&str] = &["null", "true", "false"];
+
+/// 変数・関数・引数として名前を付ける位置（let、for、foreach、func、代入の左辺の先頭）の識別子。
+/// null・true・false はエラーにする。読む側では常にリテラルになり、付けた名前で値を読めないため。
+/// ドットの後ろ（data.true など、マップのキー）はふつうの ident() のままにしておく。
+fn binding_name<'a>() -> impl Parser<'a, &'a str, String, extra::Err<Rich<'a, char>>> + Clone {
+    ident().validate(|name: String, e, emitter| {
+        if RESERVED_VALUE_WORDS.contains(&name.as_str()) {
+            emitter.emit(Rich::custom(e.span(), format!(
+                "「{}」は値を表す予約語（null・true・false）なので、変数名や関数名には使えません。別の名前を付けてください",
+                name
+            )));
+        }
+        name
+    })
+}
+
 /// `let 名前 += 値` のように、let に = 以外の代入演算子を書いた行なら、
 /// 直し方を添えたエラーメッセージを返す。
 fn let_compound_assign_hint(line: &str) -> Option<String> {
@@ -606,7 +624,7 @@ let without_chara = surface()
 // ── path_segments / assign_op（global・assignで共用）─────
 
 fn path_segments<'a>() -> impl Parser<'a, &'a str, Vec<PathSegment>, extra::Err<Rich<'a, char>>> + Clone {
-    ident().map(PathSegment::Key)
+    binding_name().map(PathSegment::Key)
         .then(
             just('.')
                 .ignore_then(ident().map(PathSegment::Key))
@@ -656,7 +674,7 @@ fn global_stmt<'a>() -> impl Parser<'a, &'a str, Stmt, extra::Err<Rich<'a, char>
 fn let_stmt<'a>() -> impl Parser<'a, &'a str, Stmt, extra::Err<Rich<'a, char>>> + Clone {
       keyword("let")                          // just("let") から変更
         .ignore_then(ws())
-        .ignore_then(ident().labelled("let文には変数名が必要です"))
+        .ignore_then(binding_name().labelled("let文には変数名が必要です"))
         .then_ignore(ws())
         .then_ignore(just('=').labelled("「let 変数名 = 値」の「=」が必要です"))
         .then_ignore(ws())
@@ -689,11 +707,11 @@ fn stmt<'a>() -> impl Parser<'a, &'a str, Spanned<Stmt>, extra::Err<Rich<'a, cha
             .then_ignore(ws_nl());
     let func_def = keyword("func")           // just("func") から変更
     .ignore_then(ws())
-            .ignore_then(ident().labelled("func定義には関数名が必要です"))
+            .ignore_then(binding_name().labelled("func定義には関数名が必要です"))
             .then_ignore(ws())
             .then_ignore(just('(').labelled("func定義のパラメータリストは「(」で始めます"))
             .then(
-                ident()
+                binding_name()
                     .separated_by(just(',').padded_by(ws()))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -717,7 +735,7 @@ let return_stmt = keyword("return")       // just("return") から変更
        .ignore_then(
         keyword("let")                     // ★ここも
             .ignore_then(ws())
-                    .ignore_then(ident())
+                    .ignore_then(binding_name())
                     .then_ignore(ws())
                     .then_ignore(just('='))
                     .then_ignore(ws())
@@ -731,6 +749,7 @@ let return_stmt = keyword("return")       // just("return") から変更
             .then_ignore(ws())
             .then_ignore(just(';').labelled("for文の条件式の後に「;」が必要です"))
             .then_ignore(ws())
+            // stepの変数は初期化のletと同じ名前なので、予約語のエラーはletの側で1回だけ出す
             .then(
                 ident()
                     .then_ignore(ws())
@@ -762,11 +781,11 @@ let foreach_loop = keyword("foreach")     // just("foreach") から変更
             .then_ignore(ws())
                .then_ignore(keyword("as").labelled("「foreach 式 as キー」の「as」が必要です"))
             .then_ignore(ws())
-            .then(ident().labelled("「foreach 式 as キー」のキー変数名が必要です"))
+            .then(binding_name().labelled("「foreach 式 as キー」のキー変数名が必要です"))
             .then(
                 ws().ignore_then(just(','))
                     .ignore_then(ws())
-                    .ignore_then(ident())
+                    .ignore_then(binding_name())
                     .or_not(),
             )
             .then_ignore(ws())
@@ -1641,11 +1660,11 @@ pub fn program_with_include<'a>() -> impl Parser<'a, &'a str, Vec<ProgramItem>, 
 
     let top_func = keyword("func")  
         .ignore_then(ws())
-        .ignore_then(ident())
+        .ignore_then(binding_name())
         .then_ignore(ws())
         .then_ignore(just('('))
         .then(
-            ident()
+            binding_name()
                 .separated_by(just(',').padded_by(ws()))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -2094,6 +2113,49 @@ fn unrecognized_stmt_message(line: &str) -> String {
     let msg = crate::diagnostic::render_legacy(&rich_to_diagnostic(&errors[0], &pre, &src, "main.mnt"));
     assert!(msg.contains("認識できない文です"), "{}", msg);
     msg
+}
+
+#[cfg(test)]
+fn parse_error_messages(src: &str) -> Vec<String> {
+    let pre = preprocess(src).expect("preprocess failed");
+    let result = program_with_include().parse(&*pre.src).into_result();
+    match result {
+        Ok(_) => vec![],
+        Err(errors) => errors.iter().map(|e| e.to_string()).collect(),
+    }
+}
+
+#[test]
+fn test_reserved_words_cannot_be_bound() {
+    let cases = [
+        "OnBoot => {\n    let null = 1\n}",
+        "OnBoot => {\n    global true = 1\n}",
+        "OnBoot => {\n    false = 1\n}",
+        "func null() {\n    return 1\n}",
+        "func f(true) {\n    return 1\n}",
+        "OnBoot => {\n    func g(false) {\n        return 1\n    }\n}",
+        "OnBoot => {\n    let xs = [1]\n    foreach xs as null {\n    }\n}",
+        "OnBoot => {\n    let xs = [1]\n    foreach xs as i, true {\n    }\n}",
+    ];
+    for src in cases {
+        let errors = parse_error_messages(src);
+        assert!(
+            errors.iter().any(|m| m.contains("予約語")),
+            "予約語のエラーが出るはず: {:?}\n{}", errors, src
+        );
+    }
+}
+
+#[test]
+fn test_reserved_word_in_for_reported_once() {
+    let errors = parse_error_messages("OnBoot => {\n    for (let null = 0; 1 < 2; null++) {\n    }\n}");
+    assert_eq!(errors.iter().filter(|m| m.contains("予約語")).count(), 1, "{:?}", errors);
+}
+
+#[test]
+fn test_reserved_words_still_usable_as_map_keys_and_name_prefixes() {
+    let src = "OnBoot => {\n    let d = {\"true\": 1}\n    let nullable = 2\n    global save.設定.true = 1\n    湊: ${d.true}${nullable}${null}${false}\n}";
+    assert!(parse_error_messages(src).is_empty(), "{:?}", parse_error_messages(src));
 }
 
 #[test]
