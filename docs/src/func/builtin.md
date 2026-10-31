@@ -114,8 +114,12 @@ OnBoot => {
 | `sort(arr, "kana")` | かな順にソート | `sort(["ばなな","イチゴ","かき","ぱいん","がむ"], "kana")` → `["イチゴ","かき","がむ","ぱいん","ばなな"]` |
 | `reverse(arr)` | 逆順にした新しい配列を返す | `reverse([1,2,3])` → `[3,2,1]` |
 | `unique(arr)` | 重複を除いた新しい配列を返す | `unique([1,2,1,3])` → `[1,2,3]` |
+| `pick(arr)` | ランダムに1要素を返す（空配列・配列以外は `null`） | `pick(["a","b","c"])` → `"b"` など |
+| `shuffle(arr)` | ランダムに並べ替えた新しい配列を返す（配列以外は `null`） | `shuffle([1,2,3])` → `[3,1,2]` など |
 
-`push` `pop` `sort` `reverse` `unique` は元の配列を変更しません。新しい配列を返します。配列以外を渡すと、`sort` `reverse` `unique` は空配列を返します。
+`push` `pop` `sort` `reverse` `unique` `shuffle` は元の配列を変更しません。新しい配列を返します。配列以外を渡すと、`sort` `reverse` `unique` は空配列を、`shuffle` は `null` を返します。
+
+`pick` と `shuffle` の乱数は `rand` と同じものを使います。
 
 ### sortのモード
 

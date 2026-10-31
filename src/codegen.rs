@@ -606,6 +606,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "first", "last", "push", "pop", "slice",
     "has_key", "keys", "values", "delete",
     "count", "sort", "reverse", "unique",
+    "pick", "shuffle",
     "json_parse", "json_stringify",
     "get_property", "choose", "days_since", "saori", "log" , "is_null",
     "is_num", "is_str", "is_bool", "is_array", "is_map", "type_of",
@@ -986,6 +987,22 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
         "reverse" => match vals.first() {
             Some(Value::Array(arr)) => { let mut new = arr.clone(); new.reverse(); Value::Array(new) }
             _ => Value::Array(vec![]),
+        },
+        "pick" => match vals.first() {
+            Some(Value::Array(arr)) if !arr.is_empty() =>
+                arr[simple_rand() as usize % arr.len()].clone(),
+            _ => Value::Null,
+        },
+        "shuffle" => match vals.first() {
+            // Fisher-Yates。元の配列は変更せず新しい配列を返す
+            Some(Value::Array(arr)) => {
+                let mut new = arr.clone();
+                for i in (1..new.len()).rev() {
+                    new.swap(i, simple_rand() as usize % (i + 1));
+                }
+                Value::Array(new)
+            }
+            _ => Value::Null,
         },
    "unique" => match vals.first() {
     Some(Value::Array(arr)) => {
@@ -5549,5 +5566,42 @@ mod builtin_ext_tests {
         }
         assert_eq!(num(call("rand", vec![n(7.0), n(7.0)])), 7.0);
         assert!(num(call("rand", vec![])) >= 0.0);
+    }
+
+    fn nums(v: &Value) -> Vec<f64> {
+        match v { Value::Array(a) => a.iter().map(|x| x.as_number()).collect(), _ => panic!("配列でない") }
+    }
+
+    #[test]
+    fn test_pick() {
+        let src = arr(&[1.0, 2.0, 3.0]);
+        let mut seen = [false; 3];
+        for _ in 0..2000 {
+            let v = num(call("pick", vec![src.clone()]));
+            assert!((1.0..=3.0).contains(&v), "範囲外: {}", v);
+            seen[v as usize - 1] = true;
+        }
+        assert!(seen.iter().all(|b| *b), "選ばれない要素がある");
+        assert_eq!(nums(&src), [1.0, 2.0, 3.0], "元の配列が変わった");
+        assert!(matches!(call("pick", vec![arr(&[])]), Value::Null));
+        assert!(matches!(call("pick", vec![Value::Str("abc".into())]), Value::Null));
+        assert!(matches!(call("pick", vec![]), Value::Null));
+    }
+
+    #[test]
+    fn test_shuffle() {
+        let src = arr(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let mut changed = false;
+        for _ in 0..200 {
+            let mut sorted = nums(&call("shuffle", vec![src.clone()]));
+            if sorted != [1.0, 2.0, 3.0, 4.0, 5.0] { changed = true; }
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(sorted, [1.0, 2.0, 3.0, 4.0, 5.0], "要素の集合が変わった");
+        }
+        assert!(changed, "一度も並びが変わらない");
+        assert_eq!(nums(&src), [1.0, 2.0, 3.0, 4.0, 5.0], "元の配列が変わった");
+        assert!(nums(&call("shuffle", vec![arr(&[])])).is_empty());
+        assert!(matches!(call("shuffle", vec![Value::Str("abc".into())]), Value::Null));
+        assert!(matches!(call("shuffle", vec![]), Value::Null));
     }
 }
