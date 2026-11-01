@@ -33,12 +33,16 @@ pub struct Analyzer<'a> {
     /// 自由変数チェックで報告済みの名前（talk/funcごとにリセット）
     reported_reads: HashSet<String>,
     reported_assigns: HashSet<String>,
+    /// トークの条件フィルタ if(...) を検査中か
+    in_talk_cond: bool,
 }
 
 /// スコープ内の変数1つ分の記録。未使用・書くだけの変数の検出に使う。
 struct Binding {
     /// let で作った変数か（引数・ループ変数は未使用でも報告しない）
     is_let: bool,
+    /// func の引数か（draw で書き戻しても呼び出し元には戻らない）
+    is_param: bool,
     file: String,
     line: u32,
     read: bool,
@@ -53,6 +57,8 @@ pub mod rule {
     pub const UNREACHABLE_CODE: &str = "unreachable-code";
     pub const UNDEFINED_CALL: &str = "undefined-call";
     pub const LOOP_CONTROL_OUTSIDE_LOOP: &str = "loop-control-outside-loop";
+    pub const DRAW_TARGET: &str = "draw-target";
+    pub const DRAW_IN_CONDITION: &str = "draw-in-condition";
 }
 
 /// 処理系が用意する変数。引数・let・globalのどれでもなくても読める。
@@ -86,6 +92,7 @@ impl<'a> Analyzer<'a> {
             let_scopes: vec![],
             reported_reads: HashSet::new(),
             reported_assigns: HashSet::new(),
+            in_talk_cond: false,
         }
     }
 
@@ -123,7 +130,9 @@ pub fn analyze(
             self.loop_depth = 0;
             // condは本体より先に評価されるので、本体のローカルfuncを登録する前に検査する
             if let Some(cond) = &talk.cond {
+                self.in_talk_cond = true;
                 self.check_expr(Pos { file: &talk.file, line: talk.cond_line }, cond);
+                self.in_talk_cond = false;
             }
             let local_funcs = collect_local_func_names(&talk.body);
             for name in &local_funcs { self.func_names.insert(name.clone()); }
@@ -160,7 +169,10 @@ pub fn analyze(
 
     fn begin_free_var_check(&mut self, params: &[String]) {
         self.let_scopes = vec![HashMap::new()];
-        for p in params { self.declare_other(p); }
+        for p in params {
+            self.declare_other(p);
+            if let Some(b) = self.binding_mut(p) { b.is_param = true; }
+        }
         self.reported_reads.clear();
         self.reported_assigns.clear();
     }
@@ -223,7 +235,7 @@ pub fn analyze(
     /// let で変数を作る。同じスコープで同じ名前をもう一度 let したときは、
     /// 前の変数はそこで見えなくなるので、読まれていなければここで報告する。
     fn declare_let(&mut self, at: Pos<'_>, name: &str) {
-        let binding = Binding { is_let: true, file: at.file.to_string(), line: at.line, read: false, written: false };
+        let binding = Binding { is_let: true, is_param: false, file: at.file.to_string(), line: at.line, read: false, written: false };
         let prev = self.let_scopes.last_mut().and_then(|s| s.insert(name.to_string(), binding));
         if let Some(prev) = prev { self.report_unread(name, &prev); }
     }
@@ -231,7 +243,7 @@ pub fn analyze(
     /// 引数・ループ変数。未使用でも報告しない。
     fn declare_other(&mut self, name: &str) {
         if let Some(scope) = self.let_scopes.last_mut() {
-            scope.insert(name.to_string(), Binding { is_let: false, file: String::new(), line: 0, read: false, written: false });
+            scope.insert(name.to_string(), Binding { is_let: false, is_param: false, file: String::new(), line: 0, read: false, written: false });
         }
     }
 
@@ -334,9 +346,7 @@ pub fn analyze(
                 }
             }
             Stmt::Return(e) => self.fv_expr(at, e),
-            Stmt::Call(Expr::Call(_, args)) => {
-                for a in args { self.fv_expr(at, a); }
-            }
+            Stmt::Call(Expr::Call(name, args)) => self.fv_call(at, name, args),
             // call 名前 の名前はふつうトーク名なので、自由変数としては報告しない。
             // ただし let した変数なら、その値をトーク名に使う動的callなので読みとして数える
             Stmt::Call(Expr::Var(path)) => {
@@ -379,9 +389,7 @@ pub fn analyze(
                 if let Some(head) = path.first() { self.fv_read(at, head); }
             }
             Expr::InterpolatedStr(parts) => self.fv_str_parts(at, parts),
-            Expr::Call(_, args) => {
-                for a in args { self.fv_expr(at, a); }
-            }
+            Expr::Call(name, args) => self.fv_call(at, name, args),
             Expr::Array(items) => {
                 for e in items { self.fv_expr(at, e); }
             }
@@ -402,6 +410,57 @@ pub fn analyze(
             }
             Expr::Not(e) => self.fv_expr(at, e),
             Expr::Str(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Null => {}
+        }
+    }
+
+    /// draw(変数, …) の変数は、読んでから書き戻す。
+    /// 束縛のない名前なら、書き戻しでglobalができるので代入の notice だけを出す。
+    /// 引数なら、書き戻しても呼び出し元には戻らないことを知らせる。
+    fn fv_call(&mut self, at: Pos<'_>, name: &str, args: &[Expr]) {
+        let target = match args.first() {
+            Some(Expr::Var(path)) if self.is_builtin_draw(name) => path.first(),
+            _ => None,
+        };
+        let Some(head) = target else {
+            for a in args { self.fv_expr(at, a); }
+            return;
+        };
+        let is_param = match self.binding_mut(head) {
+            Some(b) => {
+                b.read = true;
+                b.written = true;
+                b.is_param
+            }
+            None => {
+                self.fv_assign(at, head);
+                false
+            }
+        };
+        if is_param {
+            self.push_at(Level::Notice, rule::DRAW_TARGET, at, format!(
+                "\"{}\" は引数なので、draw で引いても呼び出し元の山札は減りません（山札は global か save に置いてください）",
+                head
+            ));
+        }
+        for a in &args[1..] { self.fv_expr(at, a); }
+    }
+
+    /// 同名のfunc/talkがなく、ビルトインの draw が呼ばれるか。
+    fn is_builtin_draw(&self, name: &str) -> bool {
+        name == "draw" && !self.func_names.contains(name) && !self.talk_names.contains(name)
+    }
+
+    /// ビルトインの draw の呼び出しを検査する。1つ目が変数でなければ書き戻せないのでエラー。
+    /// トークの条件の中では、選ばれなかったトークでも山札が減るので警告する。
+    fn check_draw_call(&mut self, at: Pos<'_>, name: &str, args: &[Expr]) {
+        if !self.is_builtin_draw(name) { return; }
+        if !matches!(args.first(), Some(Expr::Var(_))) {
+            self.push_at(Level::Error, rule::DRAW_TARGET, at,
+                "draw の1つ目には、山札を入れた変数を書いてください（式や添字付きの変数には書き戻せません）".to_string());
+        }
+        if self.in_talk_cond {
+            self.push_at(Level::Warning, rule::DRAW_IN_CONDITION, at,
+                "トークの条件の中で draw を使っています。条件は候補を選ぶときに全部評価されるので、選ばれなかったトークでも山札が減ります".to_string());
         }
     }
 
@@ -458,6 +517,7 @@ pub fn analyze(
         match expr {
             Expr::Call(name, args) => {
                 self.check_call_name(at, name);
+                self.check_draw_call(at, name, args);
                 for a in args { self.check_expr(at, a); }
             }
             Expr::Array(items) => {
@@ -535,7 +595,8 @@ pub fn analyze(
                 }
             }
             // 呼び出す名前そのものは check_stmt の Stmt::Call で見るので、ここでは引数だけ
-            Stmt::Call(Expr::Call(_, args)) => {
+            Stmt::Call(Expr::Call(name, args)) => {
+                self.check_draw_call(at, name, args);
                 for a in args { self.check_expr(at, a); }
             }
             Stmt::Call(_) | Stmt::FuncDef { .. } | Stmt::Break | Stmt::Continue => {}
@@ -1375,5 +1436,67 @@ OnBoot => {
     fn test_return_in_if_does_not_make_rest_unreachable() {
         let d = analyze_src_with_globals("OnBoot => {\n    if (true) {\n        return\n    }\n    湊: 届く\n}");
         assert!(by_rule(&d, rule::UNREACHABLE_CODE).is_empty(), "{:?}", d);
+    }
+
+    // ---- draw ----
+
+    #[test]
+    fn test_draw_non_variable_target_is_error() {
+        for arg in ["[1, 2]", "shuffle(xs)", "xs[0]"] {
+            let src = format!("OnBoot => {{\n    global xs = [1]\n    湊: ${{draw({})}}\n}}", arg);
+            let d = analyze_src_with_globals(&src);
+            let t = by_rule(&d, rule::DRAW_TARGET);
+            assert_eq!(t.len(), 1, "{}: {:?}", arg, d);
+            assert_eq!(t[0].level, Level::Error);
+            assert_eq!(t[0].line(), Some(3));
+        }
+    }
+
+    #[test]
+    fn test_draw_statement_non_variable_target_is_error() {
+        let d = analyze_src_with_globals("OnBoot => {\n    draw([1])\n}");
+        assert_eq!(by_rule(&d, rule::DRAW_TARGET).len(), 1, "{:?}", d);
+    }
+
+    #[test]
+    fn test_draw_variable_targets_no_diagnostics() {
+        let d = analyze_src_with_globals("OnBoot => {\n    global save.山札 ?= []\n    let d = [1]\n    湊: ${draw(save.山札, [\"a\"])}${draw(d)}\n}");
+        assert!(d.is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn test_draw_in_talk_cond_warns() {
+        let d = analyze_src_with_globals("global save.d = [1]\n\nOnBoot if(draw(save.d) == 1) => {\n    湊: a\n}");
+        let w = by_rule(&d, rule::DRAW_IN_CONDITION);
+        assert_eq!(w.len(), 1, "{:?}", d);
+        assert_eq!(w[0].level, Level::Warning);
+    }
+
+    #[test]
+    fn test_draw_on_param_notice() {
+        let d = analyze_src_with_globals("func f(d) {\n    return draw(d)\n}");
+        let n = by_rule(&d, rule::DRAW_TARGET);
+        assert_eq!(n.len(), 1, "{:?}", d);
+        assert_eq!(n[0].level, Level::Notice);
+    }
+
+    #[test]
+    fn test_draw_on_unbound_name_reports_assign_only() {
+        let d = analyze_src_with_globals("func f() {\n    return draw(deck)\n}");
+        let fv = by_rule(&d, rule::FREE_VARIABLE);
+        assert_eq!(fv.len(), 1, "{:?}", d);
+        assert!(fv[0].message.contains("への代入は"), "{:?}", fv);
+    }
+
+    #[test]
+    fn test_draw_counts_as_read_of_let() {
+        let d = analyze_src_with_globals("OnBoot => {\n    let d = [1]\n    draw(d)\n}");
+        assert!(by_rule(&d, rule::UNUSED_VARIABLE).is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn test_user_func_named_draw_is_not_checked() {
+        let d = analyze_src_with_globals("func draw(x) {\n    return x\n}\n\nOnBoot => {\n    湊: ${draw(1)}\n}");
+        assert!(by_rule(&d, rule::DRAW_TARGET).is_empty(), "{:?}", d);
     }
 }

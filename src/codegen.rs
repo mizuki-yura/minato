@@ -418,6 +418,55 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+// ── 山札（shuffle / draw）────────────────────────────────
+
+/// Fisher-Yatesで並べ替えた新しい配列を返す。
+/// avoid_last を渡すと、末尾（drawで次に引かれる位置）がそれと同じ値にならないよう入れ替える。
+/// 全部が同じ値なら避けようがないので、そのままにする。
+fn shuffled_values(arr: &[Value], avoid_last: Option<&Value>) -> Vec<Value> {
+    let mut new = arr.to_vec();
+    for i in (1..new.len()).rev() {
+        new.swap(i, simple_rand() as usize % (i + 1));
+    }
+    if let (Some(prev), Some(last)) = (avoid_last, new.len().checked_sub(1)) {
+        if values_equal(&new[last], prev) {
+            if let Some(i) = (0..last).find(|&i| !values_equal(&new[i], prev)) {
+                new.swap(i, last);
+            }
+        }
+    }
+    new
+}
+
+/// draw(deck, words) の本体。引いた1枚と、変数に書き戻す新しい山札を返す。
+/// 山札は末尾から引く。words が空でない配列なら、山札が空のときに補充する。
+/// 最後の1枚を引いたときはその場で補充し、直後に同じ札が続かないようにする。
+/// 書き戻す必要がないとき（引けなかったとき）は None を返す。
+fn draw_card(deck: Value, words: Option<&Value>) -> (Value, Option<Value>) {
+    let refill = match words {
+        Some(Value::Array(w)) if !w.is_empty() => Some(w),
+        _ => None,
+    };
+    let mut cards = match (deck, refill) {
+        (Value::Array(a), _) => a,
+        (_, Some(_)) => Vec::new(),
+        (_, None) => return (Value::Null, None),
+    };
+    if cards.is_empty() {
+        match refill {
+            Some(w) => cards = shuffled_values(w, None),
+            None => return (Value::Null, None),
+        }
+    }
+    let card = cards.pop().unwrap_or(Value::Null);
+    if cards.is_empty() {
+        if let Some(w) = refill {
+            cards = shuffled_values(w, Some(&card));
+        }
+    }
+    (card, Some(Value::Array(cards)))
+}
+
 fn map_values_equal(a: &IndexMap<String, Value>, b: &IndexMap<String, Value>) -> bool {
     a.len() == b.len()
         && a.iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(v, bv)))
@@ -606,7 +655,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "first", "last", "push", "pop", "slice",
     "has_key", "keys", "values", "delete",
     "count", "sort", "reverse", "unique",
-    "pick", "shuffle",
+    "pick", "shuffle", "draw",
     "json_parse", "json_stringify",
     "get_property", "choose", "days_since", "saori", "log" , "is_null",
     "is_num", "is_str", "is_bool", "is_array", "is_map", "type_of",
@@ -994,16 +1043,12 @@ fn call_builtin(name: &str, vals: Vec<Value>, env: &Env) -> Value {
             _ => Value::Null,
         },
         "shuffle" => match vals.first() {
-            // Fisher-Yates。元の配列は変更せず新しい配列を返す
-            Some(Value::Array(arr)) => {
-                let mut new = arr.clone();
-                for i in (1..new.len()).rev() {
-                    new.swap(i, simple_rand() as usize % (i + 1));
-                }
-                Value::Array(new)
-            }
+            Some(Value::Array(arr)) => Value::Array(shuffled_values(arr, None)),
             _ => Value::Null,
         },
+        // draw は変数を書き換えるので、本来は eval_expr_full で処理する。
+        // ここに来るのは &Env 版の eval_expr から呼ばれたときだけで、書き戻せないので何も引かない
+        "draw" => Value::Null,
    "unique" => match vals.first() {
     Some(Value::Array(arr)) => {
         let mut result: Vec<Value> = Vec::new();
@@ -1783,6 +1828,15 @@ Expr::Call(fname, args) => {
         };
     }
 
+    // draw は1つ目の引数の変数を書き換えるので、値ではなく式のまま受け取る。
+    // 同名のfunc/talkがあればそちらを優先する（ほかのビルトインと同じ解決順）
+    if fname == "draw"
+        && !self.env.funcs.contains_key(fname.as_str())
+        && !self.talks.contains_key(fname.as_str())
+    {
+        return self.eval_draw(args);
+    }
+
     let vals: Vec<Value> = args.iter().map(|a| self.eval_expr_full(a)).collect();
     if self.env.funcs.contains_key(fname.as_str()) {
         self.call_func(fname, vals)
@@ -2532,6 +2586,25 @@ fn filter_alive<'t>(&mut self, candidates: &'t [Talk]) -> Vec<(usize, &'t Talk)>
     self.errors.append(&mut kept);
     alive
 }
+
+    /// draw(deck) / draw(deck, words)。1枚引き、残りの山札を deck の変数に書き戻す。
+    /// 書き戻しは let なしの代入（deck = …）と同じく、ローカルにあればローカル、なければglobal。
+    fn eval_draw(&mut self, args: &[Expr]) -> Value {
+        let Some(Expr::Var(path)) = args.first() else {
+            self.push_err("warning", "draw の1つ目には、山札を入れた変数を書いてください（式や添字付きの変数には書き戻せません）".to_string());
+            return Value::Null;
+        };
+        let deck = self.env.get_path_str(path);
+        let words = args.get(1).map(|a| self.eval_expr_full(a));
+        let (card, new_deck) = draw_card(deck, words.as_ref());
+        if let Some(new_deck) = new_deck {
+            for w in self.env.set_var_path_resolved(path, &AssignOp::Set, new_deck) {
+                self.push_err("warning", w);
+            }
+        }
+        card
+    }
+
     fn call_func(&mut self, name: &str, args: Vec<Value>) -> Value {
         if self.env.call_depth > 100 { append_log!("call depth limit exceeded"); return Value::Null; }
         self.env.call_depth += 1;
@@ -3419,6 +3492,81 @@ fn test_null_literal() {
     let talks = parse_talks(src);
     let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0true 代替\\e");
+}
+
+// ---- draw ----
+
+#[test]
+fn test_draw_writes_back_to_save() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    global save.山札 = [1, 2, 3]
+    湊: ${draw(save.山札)}/${len(save.山札)}
+}"#);
+    assert_eq!(out, "\\03/2\\e");
+}
+
+#[test]
+fn test_draw_writes_back_to_let_and_returns_null_when_empty() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    let d = ["a", "b"]
+    湊: ${draw(d)}${draw(d)}${is_null(draw(d))}${len(d)}
+}"#);
+    assert_eq!(out, "\\0batrue0\\e");
+}
+
+#[test]
+fn test_draw_statement_writes_back_to_global_and_nested_save() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    global g = [1, 2]
+    global save.a.b = [1, 2, 3]
+    draw(g)
+    draw(save.a.b)
+    湊: ${len(g)}/${len(save.a.b)}
+}"#);
+    assert_eq!(out, "\\01/2\\e");
+}
+
+#[test]
+fn test_draw_refills_when_empty() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    global save.山札 = []
+    湊: ${draw(save.山札, ["x"])}/${len(save.山札)}
+}"#);
+    // 最後の1枚を引いた時点で補充されている
+    assert_eq!(out, "\\0x/1\\e");
+}
+
+#[test]
+fn test_draw_on_param_does_not_change_caller() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    func f(d) {
+        return draw(d)
+    }
+    global save.x = [1, 2]
+    湊: ${f(save.x)}/${len(save.x)}
+}"#);
+    assert_eq!(out, "\\02/2\\e");
+}
+
+#[test]
+fn test_draw_user_func_takes_priority() {
+    let (out, _) = run_boot_with_talks(r#"OnBoot => {
+    func draw(x) {
+        return "mine"
+    }
+    let d = [1]
+    湊: ${draw(d)}${len(d)}
+}"#);
+    assert_eq!(out, "\\0mine1\\e");
+}
+
+#[test]
+fn test_draw_non_variable_argument_warns() {
+    let (out, cg) = run_boot_with_talks(r#"OnBoot => {
+    湊: [${draw([1, 2])}]
+}"#);
+    assert_eq!(out, "\\0[]\\e");
+    assert!(cg.errors.iter().any(|(level, msg)| level == "warning" && msg.contains("draw の1つ目")), "{:?}", cg.errors);
 }
 
 // ---- 呼び出し先から呼び出し元のletは見えない ----
@@ -5603,5 +5751,69 @@ mod builtin_ext_tests {
         assert!(nums(&call("shuffle", vec![arr(&[])])).is_empty());
         assert!(matches!(call("shuffle", vec![Value::Str("abc".into())]), Value::Null));
         assert!(matches!(call("shuffle", vec![]), Value::Null));
+    }
+
+    #[test]
+    fn test_draw_card_without_refill() {
+        let (card, deck) = draw_card(arr(&[1.0, 2.0, 3.0]), None);
+        assert_eq!(num(card), 3.0, "末尾から引く");
+        assert_eq!(nums(&deck.unwrap()), [1.0, 2.0]);
+        // 空の山札・配列以外は null で、書き戻さない
+        let (card, deck) = draw_card(arr(&[]), None);
+        assert!(matches!(card, Value::Null) && deck.is_none());
+        let (card, deck) = draw_card(Value::Null, None);
+        assert!(matches!(card, Value::Null) && deck.is_none());
+        let (card, deck) = draw_card(Value::Str("abc".into()), None);
+        assert!(matches!(card, Value::Null) && deck.is_none());
+        // 最後の1枚は引けて、空の山札が残る
+        let (card, deck) = draw_card(arr(&[5.0]), None);
+        assert_eq!(num(card), 5.0);
+        assert!(nums(&deck.unwrap()).is_empty());
+    }
+
+    #[test]
+    fn test_draw_card_bad_words_is_same_as_no_refill() {
+        for words in [arr(&[]), Value::Str("abc".into()), Value::Null] {
+            let (card, deck) = draw_card(arr(&[]), Some(&words));
+            assert!(matches!(card, Value::Null) && deck.is_none());
+            let (card, deck) = draw_card(arr(&[1.0, 2.0]), Some(&words));
+            assert_eq!(num(card), 2.0);
+            assert_eq!(nums(&deck.unwrap()), [1.0]);
+        }
+    }
+
+    #[test]
+    fn test_draw_card_refills_each_round_without_repeating_at_seam() {
+        let words = arr(&[1.0, 2.0, 3.0]);
+        // 配列以外の山札は空の山札として補充する
+        let mut deck = Value::Null;
+        let mut drawn = Vec::new();
+        for _ in 0..3000 {
+            let (card, new_deck) = draw_card(deck, Some(&words));
+            drawn.push(num(card));
+            deck = new_deck.expect("補充ありなら必ず書き戻す");
+            // 最後の1枚を引いたらその場で補充するので、山札が空のまま残ることはない
+            let k = drawn.len() % 3;
+            assert_eq!(nums(&deck).len(), if k == 0 { 3 } else { 3 - k });
+        }
+        for round in drawn.chunks(3) {
+            let mut r = round.to_vec();
+            r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(r, [1.0, 2.0, 3.0], "一巡で全部が1回ずつ出ていない: {:?}", round);
+        }
+        for w in drawn.windows(2) {
+            assert_ne!(w[0], w[1], "同じ札が続いた");
+        }
+    }
+
+    #[test]
+    fn test_draw_card_single_word_repeats() {
+        let words = arr(&[7.0]);
+        let mut deck = arr(&[]);
+        for _ in 0..5 {
+            let (card, new_deck) = draw_card(deck, Some(&words));
+            assert_eq!(num(card), 7.0);
+            deck = new_deck.unwrap();
+        }
     }
 }

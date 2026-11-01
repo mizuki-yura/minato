@@ -96,6 +96,8 @@ cargo build --release --features cli --bin minato_check
 | `free-variable` | notice | 関数・トークの中の、引数・`let`・`global` のどれでもない変数（[説明](common.md#呼び出し元の-let-に頼った関数トーク)） |
 | `unused-variable` | notice | `let` で作ったのに一度も使っていない変数（[説明](common.md#使っていない変数)） |
 | `write-only-variable` | notice | 値を入れているのに一度も読んでいない変数（[説明](common.md#使っていない変数)） |
+| `draw-target` | error / notice | `draw` の1つ目が変数でない（error）、関数の引数で呼び出し元の山札が減らない（notice）（[説明](../func/builtin.md#draw山札から引く)） |
+| `draw-in-condition` | warning | トークの条件 `if(...)` の中の `draw`。選ばれなかったトークでも山札が減る（[説明](../func/builtin.md#draw山札から引く)） |
 
 `unused-variable` と `write-only-variable` は、名前を `_` で始めた変数には出ません。
 関数の戻り値を捨てるために受ける変数などは、`let _ = dict_load()` のように書いてください。
