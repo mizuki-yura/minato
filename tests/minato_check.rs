@@ -47,6 +47,20 @@ fn test_no_problems_exits_zero() {
 }
 
 #[test]
+fn test_talk_count_is_known_builtin() {
+    let dir = tempfile::tempdir().expect("tempdir作成失敗");
+    write_main_mnt(
+        dir.path(),
+        "OnBoot => {\n    湊: ${talk_count(\"OnBoot\")}\n}\n",
+    );
+
+    let output = run(dir.path());
+    assert!(output.status.success(), "exit codeが0であるべき: {:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("問題ありませんでした"), "未定義の通知などが出ている: {}", stdout);
+}
+
+#[test]
 fn test_undefined_call_reports_notice_and_exits_zero() {
     let dir = tempfile::tempdir().expect("tempdir作成失敗");
     write_main_mnt(

@@ -203,7 +203,7 @@ auto_newline = true
 | マップ | `has_key` `keys` `values` `delete` `get(map, key, 既定値)` |
 | 条件 | `choose(条件, a, b)`、`talk_exists("名前")` |
 | 日付 | `days_since(年, 月, 日)`、`days_between(…)` |
-| デバッグ | `log(値)`（`debug_log = true` のとき `minato_debug.log` へ） |
+| デバッグ | `log(値)`（`debug_log = true` のとき `minato_debug.log` へ）、`talk_count("名前")`（同名トークの定義数。`if` の結果は関係ない） |
 | 外部連携 | `get_property("…")`、`saori("x.dll", …)`（合わせて1イベント10回まで） |
 | ファイル・JSON | `file_read` `file_write` `json_parse` `json_stringify` |
 

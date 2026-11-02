@@ -659,7 +659,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "json_parse", "json_stringify",
     "get_property", "choose", "days_since", "saori", "log" , "is_null",
     "is_num", "is_str", "is_bool", "is_array", "is_map", "type_of",
-    "format","talk_exists","get", "days_between",
+    "format","talk_exists","talk_count","get", "days_between",
     "to_hankaku", "to_zenkaku",
     "pow", "sign", "exp", "ln", "log10", "sum",
         "file_read", "file_write", "file_append", "file_move",
@@ -2013,6 +2013,13 @@ else {
     let name = vals.first().map(|v| v.to_display()).unwrap_or_default();
     Value::Bool(!name.is_empty() && (self.talks.contains_key(&name) || self.env.funcs.contains_key(&name)))
 }
+// 書いてある数を返すので、condは評価しない。funcは数えない
+"talk_count" => {
+    let count = self.talk_name_arg("talk_count", &vals)
+        .and_then(|name| self.talks.get(&name).map(Vec::len))
+        .unwrap_or(0);
+    Value::Number(count as f64)
+}
 
 
     "file_read" => {
@@ -2482,7 +2489,25 @@ pub(crate) fn resolve_path_segments(&mut self, path: &[PathSegment]) -> Vec<Stri
     }).collect()
 }
 
-    
+    /// トーク名を1つ受け取るビルトインの引数を取り出す。
+    /// 数や型が違うときはwarningを積んでNoneを返す。
+    fn talk_name_arg(&mut self, fname: &str, vals: &[Value]) -> Option<String> {
+        if vals.len() != 1 {
+            self.push_err("warning", format!("{}にはトーク名を1つだけ渡してください（{}個渡されました）", fname, vals.len()));
+            return None;
+        }
+        let got = match &vals[0] {
+            Value::Str(s) => return Some(s.clone()),
+            Value::Null => "null",
+            Value::Number(_) => "数値",
+            Value::Bool(_) => "真偽値",
+            Value::Array(_) => "配列",
+            Value::Map(_) => "マップ",
+        };
+        self.push_err("warning", format!("{}にはトーク名を文字列で渡してください（{}が渡されました）", fname, got));
+        None
+    }
+
     fn file_reject(&mut self, p: &PathReject) {
         let (level, msg) = match p {
             PathReject::Denied(m) => ("error", m.clone()),
@@ -3170,6 +3195,93 @@ fn test_talk_exists_false() {
     // このテストはtalksが空でOK（"存在しないやつ"が本当に存在しないことを見たいので）
     let out = make_gen().gen_talk(&talks[0], &HashMap::new(), FIXED_TIME);
     assert_eq!(out, "\\0false\\e");
+}
+
+/// 「計測 => { 湊: ${式} }」を実行して、出力と積まれたエラーを返す
+fn eval_talk_count(defs: &str, expr: &str) -> (String, Vec<(String, String)>) {
+    let src = format!("{}\n計測 => {{\n    湊: ${{{}}}\n}}", defs, expr);
+    let pre = crate::parser::preprocess(&src).expect("preprocess failed").src;
+    let items = program_with_include().parse(&*pre).unwrap();
+    let mut talks = Vec::new();
+    let mut talk_map: HashMap<String, Vec<Talk>> = HashMap::new();
+    let mut funcs = Vec::new();
+    for item in items {
+        match item {
+            ProgramItem::Talk(t) => {
+                talk_map.entry(t.event.clone()).or_default().push(t.clone());
+                talks.push(t);
+            }
+            ProgramItem::FuncDef { name, params, body } => funcs.push((name, params, body)),
+            _ => {}
+        }
+    }
+    let mut chars = HashMap::new();
+    chars.insert("湊".to_string(), "\\0".to_string());
+    let mut cg = Codegen::new(chars, talk_map, PathBuf::from("."));
+    for (name, params, body) in funcs {
+        cg.env.funcs.insert(name, (params, body));
+    }
+    let entry = talks.iter().find(|t| t.event == "計測").expect("計測がない");
+    let out = cg.gen_talk(entry, &HashMap::new(), FIXED_TIME);
+    (out, cg.errors.clone())
+}
+
+fn repeat_talk(name: &str, n: usize) -> String {
+    format!("{} => {{\n    湊: あ\n}}\n", name).repeat(n)
+}
+
+#[test]
+fn test_talk_count_counts_definitions() {
+    let defs = format!("{}{}{}", repeat_talk("hoge", 10), repeat_talk("fuga", 5), repeat_talk("piyo", 1));
+    for (name, want) in [("hoge", 10), ("fuga", 5), ("piyo", 1), ("存在しないやつ", 0), ("", 0)] {
+        let (out, errors) = eval_talk_count(&defs, &format!("talk_count(\"{}\")", name));
+        assert_eq!(out, format!("\\0{}\\e", want), "{}", name);
+        assert!(errors.is_empty(), "{}: {:?}", name, errors);
+    }
+}
+
+#[test]
+fn test_talk_count_ignores_conditions() {
+    // if(false)で除外される定義も含めて、書いてある3つを返すこと
+    let defs = "hoge if(false) => {\n    湊: あ\n}\nhoge if(true) => {\n    湊: い\n}\nhoge => {\n    湊: う\n}\n";
+    let (out, errors) = eval_talk_count(defs, "talk_count(\"hoge\")");
+    assert_eq!(out, "\\03\\e");
+    assert!(errors.is_empty(), "{:?}", errors);
+}
+
+#[test]
+fn test_talk_count_does_not_count_funcs() {
+    let defs = format!("func 関数だけ() {{\n    return 1\n}}\nfunc 両方() {{\n    return 1\n}}\n{}", repeat_talk("両方", 2));
+    assert_eq!(eval_talk_count(&defs, "talk_count(\"関数だけ\")").0, "\\00\\e");
+    assert_eq!(eval_talk_count(&defs, "talk_exists(\"関数だけ\")").0, "\\0true\\e");
+    assert_eq!(eval_talk_count(&defs, "talk_count(\"両方\")").0, "\\02\\e");
+}
+
+#[test]
+fn test_talk_count_bad_args_warn_and_return_zero() {
+    let cases = [
+        ("talk_count()", "1つだけ渡してください（0個渡されました）"),
+        ("talk_count(\"a\", \"b\")", "1つだけ渡してください（2個渡されました）"),
+        ("talk_count(1)", "文字列で渡してください（数値が渡されました）"),
+        ("talk_count(null)", "文字列で渡してください（nullが渡されました）"),
+        ("talk_count(true)", "文字列で渡してください（真偽値が渡されました）"),
+        ("talk_count([\"hoge\"])", "文字列で渡してください（配列が渡されました）"),
+        ("talk_count({\"a\": 1})", "文字列で渡してください（マップが渡されました）"),
+    ];
+    for (expr, want) in cases {
+        let (out, errors) = eval_talk_count(&repeat_talk("hoge", 2), expr);
+        assert_eq!(out, "\\00\\e", "{}", expr);
+        assert_eq!(errors.len(), 1, "{}: {:?}", expr, errors);
+        assert_eq!(errors[0].0, "warning", "{}", expr);
+        assert!(errors[0].1.contains("talk_countにはトーク名を"), "{}: {:?}", expr, errors);
+        assert!(errors[0].1.contains(want), "{}: {:?}", expr, errors);
+    }
+}
+
+#[test]
+fn test_talk_count_user_definition_takes_priority() {
+    let defs = "func talk_count(name) {\n    return \"自作\"\n}\n";
+    assert_eq!(eval_talk_count(defs, "talk_count(\"x\")").0, "\\0自作\\e");
 }
 
     #[test]
