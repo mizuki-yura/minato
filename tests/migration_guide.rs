@@ -300,7 +300,7 @@ fn guide_files() -> Vec<PathBuf> {
     if std::env::var("MIGRATION_GUIDE_DIR").is_ok() {
         return Vec::new();
     }
-    vec![docs_src().join("cheatsheet.md")]
+    vec![docs_src().join("cheatsheet.md"), docs_src().join("func").join("builtin.md")]
 }
 
 fn docs_src() -> PathBuf {
