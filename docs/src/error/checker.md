@@ -98,6 +98,8 @@ cargo build --release --features cli --bin minato_check
 | `write-only-variable` | notice | 値を入れているのに一度も読んでいない変数（[説明](common.md#使っていない変数)） |
 | `draw-target` | error / notice | `draw` の1つ目が変数でない（error）、関数の引数で呼び出し元の山札が減らない（notice）（[説明](../func/builtin.md#draw山札から引く)） |
 | `draw-in-condition` | warning | トークの条件 `if(...)` の中の `draw`。選ばれなかったトークでも山札が減る（[説明](../func/builtin.md#draw山札から引く)） |
+| `code-in-dialogue` | warning | セリフの続き行として読まれた、代入や `hoge()` に見える行（[説明](../control/script.md#書き忘れたとき)） |
+| `script-block-after-dialogue` | notice | セリフの直後の `@{` の行。0.4.0まではセリフの続きだった（[説明](../control/script.md#040-以前からの変更)） |
 
 `unused-variable` と `write-only-variable` は、名前を `_` で始めた変数には出ません。
 関数の戻り値を捨てるために受ける変数などは、`let _ = dict_load()` のように書いてください。

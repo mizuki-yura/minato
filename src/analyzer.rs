@@ -59,6 +59,9 @@ pub mod rule {
     pub const LOOP_CONTROL_OUTSIDE_LOOP: &str = "loop-control-outside-loop";
     pub const DRAW_TARGET: &str = "draw-target";
     pub const DRAW_IN_CONDITION: &str = "draw-in-condition";
+    // 以下2つは静的解析ではなく、読み込み前の前処理（parser::preprocess_all）が出す
+    pub const CODE_IN_DIALOGUE: &str = "code-in-dialogue";
+    pub const SCRIPT_BLOCK_AFTER_DIALOGUE: &str = "script-block-after-dialogue";
 }
 
 /// 処理系が用意する変数。引数・let・globalのどれでもなくても読める。
@@ -346,6 +349,8 @@ pub fn analyze(
                 }
             }
             Stmt::Return(e) => self.fv_expr(at, e),
+            // 実行時と同じくスコープを積まない
+            Stmt::Script(body) => self.fv_stmts(body),
             Stmt::Call(Expr::Call(name, args)) => self.fv_call(at, name, args),
             // call 名前 の名前はふつうトーク名なので、自由変数としては報告しない。
             // ただし let した変数なら、その値をトーク名に使う動的callなので読みとして数える
@@ -599,7 +604,7 @@ pub fn analyze(
                 self.check_draw_call(at, name, args);
                 for a in args { self.check_expr(at, a); }
             }
-            Stmt::Call(_) | Stmt::FuncDef { .. } | Stmt::Break | Stmt::Continue => {}
+            Stmt::Call(_) | Stmt::FuncDef { .. } | Stmt::Break | Stmt::Continue | Stmt::Script(_) => {}
         }
     }
 
@@ -678,6 +683,7 @@ Stmt::Call(expr) => {
                     self.check_stmts(&arm.body);
                 }
             }
+            Stmt::Script(body) => self.check_stmts(body),
             Stmt::FuncDef { body, .. } => {
                 // func内のネスト定義（現状パーサーでは出ないが念のため）
                 let prev_loop = self.loop_depth;
@@ -718,7 +724,8 @@ fn collect_local_func_names_into(stmts: &[Spanned<Stmt>], names: &mut HashSet<St
             }
             Stmt::While(_, body)
             | Stmt::For { body, .. }
-            | Stmt::ForEach { body, .. } => {
+            | Stmt::ForEach { body, .. }
+            | Stmt::Script(body) => {
                 collect_local_func_names_into(body, names);
             }
             Stmt::Match { arms, .. } => {
@@ -749,7 +756,8 @@ fn collect_global_names_into(stmts: &[Spanned<Stmt>], names: &mut HashSet<String
             Stmt::While(_, body)
             | Stmt::For { body, .. }
             | Stmt::ForEach { body, .. }
-            | Stmt::FuncDef { body, .. } => {
+            | Stmt::FuncDef { body, .. }
+            | Stmt::Script(body) => {
                 collect_global_names_into(body, names);
             }
             Stmt::Match { arms, .. } => {
@@ -1083,6 +1091,26 @@ OnMmmMiddle => {
 
     fn undefined_notices(errors: &[Diagnostic]) -> Vec<&Diagnostic> {
         errors.iter().filter(|e| e.level == Level::Notice && e.message.contains("未定義")).collect()
+    }
+
+    #[test]
+    fn test_script_block_shares_scope_for_free_variables() {
+        // 処理ブロックの中のletは外から見え、ブロック内のifのletは見えない
+        let src = "OnBoot => {\n    @{\n        let a = 1\n        if (true) {\n            let b = 2\n        }\n    }\n    湊: ${a}${b}\n}";
+        let free: Vec<_> = analyze_src(src).into_iter()
+            .filter(|d| d.rule == Some(rule::FREE_VARIABLE))
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(free.len(), 1, "{:?}", free);
+        assert!(free[0].contains('b'), "{:?}", free);
+    }
+
+    #[test]
+    fn test_script_block_body_is_checked() {
+        let src = "OnBoot => {\n    @{\n        break\n        未定義の関数()\n    }\n}";
+        let ds = analyze_src(src);
+        assert!(ds.iter().any(|d| d.rule == Some(rule::LOOP_CONTROL_OUTSIDE_LOOP)), "{:?}", ds);
+        assert!(ds.iter().any(|d| d.rule == Some(rule::UNDEFINED_CALL)), "{:?}", ds);
     }
 
     #[test]

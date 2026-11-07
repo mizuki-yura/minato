@@ -1779,6 +1779,9 @@ Stmt::While(cond, body) => {
             Stmt::Break    => Some(FlowControl::Break),
             Stmt::Continue => Some(FlowControl::Continue),
 
+            // 処理ブロックはスコープを積まない（中のletは閉じた後も見える）
+            Stmt::Script(body) => self.run_stmts(body, out),
+
             Stmt::Match { expr, arms } => {
                 let val = self.eval_expr_full(expr);
                 let _val_str = val.to_display();
@@ -2829,6 +2832,56 @@ mod tests {
 }");
         assert!(errs.iter().any(|(l, m)| l == "warning"
             && m == "main.mntの3行目: items[3] は存在しません（要素数 3、有効な添字は 0〜2）"), "{:?}", errs);
+    }
+
+    #[test]
+    fn test_script_block_runs_in_current_scope() {
+        // セリフの直後でも処理として実行され、中のletは閉じた後も見える
+        let (out, errs) = run_errors("OnBoot => {
+    let a = 1
+    湊: 前
+    @{
+        a += 10
+        let b = a + 1
+    }
+    湊: ${a}/${b}
+}");
+        assert!(out.contains("前") && out.contains("11/12"), "{}", out);
+        assert!(!out.contains("a +="), "{}", out);
+        assert!(errs.is_empty(), "{:?}", errs);
+    }
+
+    #[test]
+    fn test_script_block_zenkaku_and_one_line() {
+        let (out, _) = run_errors("OnBoot => {
+    湊: 前
+    @｛
+        let x = 5
+    ｝
+    湊: ${x}
+    @{ x = 7 }
+    湊: ${x}
+    @｛ x += 1 ｝
+    湊: ${x}
+}");
+        assert!(out.contains('5') && out.contains('7') && out.contains('8'), "{}", out);
+        assert!(!out.contains('｝') && !out.contains('｛'), "{}", out);
+    }
+
+    #[test]
+    fn test_script_block_inner_if_keeps_its_scope_and_return_propagates() {
+        let (out, _) = run_errors("OnBoot => {
+    @{
+        if (true) {
+            let y = 1
+        }
+        湊: [${y}]
+        return \"R\"
+    }
+    湊: 届かない
+}");
+        assert!(out.contains("[]") && out.contains('R'), "{}", out);
+        assert!(!out.contains("届かない"), "{}", out);
     }
 
     #[test]

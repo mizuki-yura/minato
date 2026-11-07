@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::analyzer::{Analyzer, top_global_names};
 use crate::diagnostic::{sort_diagnostics, Diagnostic, Level};
-use crate::parser::{load_program, AssignOp, Expr, LoadError, PathSegment, Spanned, Stmt, Talk};
+use crate::parser::{load_program_with_warnings, AssignOp, Expr, LoadError, PathSegment, Spanned, Stmt, Talk};
 
 /// チェック結果。diagnosticsはファイル名・行番号順に並べ済み（読み込み前の失敗は1件のみ）。
 #[derive(Debug, Clone)]
@@ -31,6 +31,8 @@ type LoadResult = Result<
         Vec<Talk>,
         Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>,
         Vec<(Vec<PathSegment>, AssignOp, Expr)>,
+        // 前処理の指摘（セリフの続きに見える処理など）
+        Vec<Diagnostic>,
     ),
     LoadError,
 >;
@@ -45,7 +47,9 @@ fn run_load_program(main_mnt: &Path) -> LoadResult {
         .stack_size(16 * 1024 * 1024) // 16MB
         .spawn(move || {
             let mut visited = HashSet::new();
-            load_program(&main_mnt, &mut visited)
+            let mut warnings = Vec::new();
+            load_program_with_warnings(&main_mnt, &mut visited, &mut warnings)
+                .map(|(talks, funcs, globals)| (talks, funcs, globals, warnings))
         });
 
     match spawned {
@@ -66,7 +70,7 @@ fn run_load_program(main_mnt: &Path) -> LoadResult {
 pub fn check_ghost(master_dir: &Path) -> CheckResult {
     let main_mnt = master_dir.join("talks").join("main.mnt");
 
-    let (all_talks, all_funcs, all_globals) = match run_load_program(&main_mnt) {
+    let (all_talks, all_funcs, all_globals, pre_warnings) = match run_load_program(&main_mnt) {
         Ok(r) => r,
         Err(LoadError::PreprocessError(d)) => return CheckResult { diagnostics: vec![d], load_failed: true },
         Err(LoadError::ParseError(mut diags, _path)) => {
@@ -89,6 +93,7 @@ pub fn check_ghost(master_dir: &Path) -> CheckResult {
     let mut diagnostics = Analyzer::new(talk_names, func_names)
         .with_global_names(top_global_names(&all_globals))
         .analyze(&talks, &all_funcs);
+    diagnostics.extend(pre_warnings);
     sort_diagnostics(&mut diagnostics);
     CheckResult { diagnostics, load_failed: false }
 }

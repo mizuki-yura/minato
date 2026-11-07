@@ -5,6 +5,7 @@ use chumsky::extra;
 use chumsky::Parser;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use crate::analyzer::rule;
 use crate::diagnostic::Diagnostic;
 #[cfg(debug_assertions)] use std::io::Write;
 // ── 型定義（変更なし）────────────────────────────────────
@@ -79,6 +80,8 @@ pub enum Stmt {
     Break,
     Continue,
     Match { expr: Expr, arms: Vec<MatchArm> },
+    /// 処理ブロック「@{ … }」。新しいスコープは作らず、今のスコープのまま中身を実行する
+    Script(Vec<Spanned<Stmt>>),
 }
 
 #[derive(Debug, Clone)]
@@ -906,7 +909,12 @@ let expr_stmt = ident()
     )
     .then_ignore(just(')').labelled("関数呼び出しは「)」で閉じてください"))
     .map(|(name, args)| Stmt::Call(Expr::Call(name, args)));
+        let script_block = just('@')
+            .ignore_then(block.clone())
+            .map(Stmt::Script);
+
         choice((
+            script_block,
             for_loop,
             foreach_loop,
             while_loop,
@@ -1052,6 +1060,9 @@ pub struct PreprocessResult {
     /// line_map[i] = 出力の (i+1) 行目が由来する元ソースの行番号。
     /// 1行に複数の元行が結合された場合は、その行の「先頭」の元行番号を持つ。
     line_map: Vec<u32>,
+    /// 読み込みは止めないが、書き手に知らせたい指摘（セリフの続きに見える処理など）。
+    /// ファイル名は入っていない（呼び出し側のload_programが入れる）。
+    pub warnings: Vec<Diagnostic>,
 }
 
 impl PreprocessResult {
@@ -1074,6 +1085,7 @@ pub fn preprocess(src: &str) -> Result<PreprocessResult, Diagnostic> {
 /// エラーのある行は読み飛ばして処理を続ける。
 pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
+    let mut warnings: Vec<Diagnostic> = Vec::new();
     let mut out = String::new();
     let mut line_map: Vec<u32> = Vec::new();
     let mut buf: Option<(String, u32)> = None;
@@ -1086,6 +1098,9 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
 
     for (line_idx, line) in src.lines().enumerate() {
         let line_num = (line_idx + 1) as u32;
+        // 処理ブロックの全角「｛」「｝」は、ここで半角に直してから読む
+        let normalized = normalize_script_braces(line, brace_stack.last().map(|&(k, _)| k));
+        let line: &str = normalized.as_deref().unwrap_or(line);
         let trimmed = line.trim();
 
 
@@ -1127,6 +1142,7 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
             || trimmed.starts_with("return")
             || trimmed.starts_with("call")
             || trimmed.contains("=>")
+            || is_script_block_start(trimmed)
         {
             LineKind::Code
         } else if buf.is_some() {
@@ -1134,6 +1150,19 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
         } else {
             LineKind::Bare
         };
+
+        if buf.is_some() && is_script_block_start(trimmed) {
+            warnings.push(Diagnostic::notice(
+                "「@{」で始まる行は処理ブロックとして読まれます（0.4.0まではセリフの続きでした）",
+            ).at(line_num).with_rule(rule::SCRIPT_BLOCK_AFTER_DIALOGUE));
+        } else if matches!(kind, LineKind::Continuation) && looks_like_code(trimmed) {
+            warnings.push(Diagnostic::warning(format!(
+                "この行はセリフの続きとして読まれます: 「{}」",
+                trimmed
+            )).at(line_num)
+                .with_hint("処理として書くなら「@{ … }」で囲んでください")
+                .with_rule(rule::CODE_IN_DIALOGUE));
+        }
 
         // セリフ本文はただの文字列なので、中の「{」はブロックや
         // マップの開閉ではない。走査してしまうと
@@ -1244,12 +1273,12 @@ pub fn preprocess_all(src: &str) -> Result<PreprocessResult, Vec<Diagnostic>> {
         errors.sort_by_key(|d| d.line());
         return Err(errors);
     }
-    Ok(PreprocessResult { src: out, line_map })
+    Ok(PreprocessResult { src: out, line_map, warnings })
 }
 
 /// 文字列リテラルの外側にある { と } の数を数える
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BraceKind { Block, Map }
+enum BraceKind { Block, Map, Script }
 /// preprocessが一行をどう扱うか。
 /// scan_bracesを呼ぶかどうかの判定と、実際の処理で
 /// 同じ条件を二度書かないために一度だけ決める。
@@ -1317,7 +1346,9 @@ fn scan_braces(trimmed: &str, depth: &mut u32) -> Result<Vec<BraceEvent>, String
                     // この '{' より前のテキストから種類を判定
                     let before: String = chars[..i].iter().collect();
                     let before = before.trim_end();
-                    let kind = if before.ends_with("=>") || before.ends_with(')') || starts_with_block_kw {
+                    let kind = if before.ends_with('@') {
+                        BraceKind::Script
+                    } else if before.ends_with("=>") || before.ends_with(')') || starts_with_block_kw {
                         BraceKind::Block
                     } else {
                         BraceKind::Map
@@ -1359,6 +1390,63 @@ fn is_dialogue_line(s: &str) -> bool {
         c.is_alphanumeric() || c == '_' || (c as u32) > 0x7F
     }) && !before_colon.contains('：')  // 全角コロンを含む場合は除外
 }
+/// 処理ブロック「@{ … }」の開始行か。前後の空白を取った行を渡す。
+/// 「@」と「{」の間に空白は許さない（「@名前」のようなセリフを巻き込まないため）。
+fn is_script_block_start(trimmed: &str) -> bool {
+    trimmed.starts_with("@{")
+}
+
+/// 処理ブロックの全角括弧を半角に直した行を返す。直す所が無ければNone。
+/// - 「@｛」で始まる行の「｛」と、同じ行の末尾の「｝」（1行で書いた場合）
+/// - 処理ブロックの中で「｝」だけの行（後ろのコメントは可）
+/// 1文字を1文字に置き換えるので、行番号も文字単位の桁もずれない。
+fn normalize_script_braces(line: &str, top: Option<BraceKind>) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("@{") || trimmed.starts_with("@｛") {
+        let mut s = line.replacen("@｛", "@{", 1);
+        if s.trim_end().ends_with('｝') {
+            if let Some(i) = s.rfind('｝') {
+                s.replace_range(i..i + '｝'.len_utf8(), "}");
+            }
+        }
+        return (s != line).then_some(s);
+    }
+    if top == Some(BraceKind::Script) {
+        if let Some(after) = trimmed.strip_prefix('｝') {
+            let after = after.trim_start();
+            if after.is_empty() || after.starts_with("//") {
+                return Some(line.replacen('｝', "}", 1));
+            }
+        }
+    }
+    None
+}
+
+/// セリフの続きとして読まれた行が、処理を書いたつもりに見えるか。
+/// - 代入: 「名前 = 値」「save.名前 += 値」など（== は比較なので除く）
+/// - 呼び出し: 「hoge()」「hoge_talk(1, 2)」。先頭が英字・_ の名前に限る
+///   （「えっと(笑)」のような日本語のセリフを巻き込まないため）
+/// 書き手に知らせるだけなので、取りこぼしても誤検出しても読み込みは変わらない。
+fn looks_like_code(trimmed: &str) -> bool {
+    let path_end = trimmed
+        .char_indices()
+        .find(|&(_, c)| !(is_ident_char(c) || c == '.'))
+        .map(|(i, _)| i)
+        .unwrap_or(trimmed.len());
+    let (path, rest) = trimmed.split_at(path_end);
+    if path.is_empty() || path.starts_with('.') || path.ends_with('.') {
+        return false;
+    }
+    let rest_ws = rest.trim_start();
+    for op in ["+=", "-=", "*=", "/=", "%=", "?=", "="] {
+        if let Some(value) = rest_ws.strip_prefix(op) {
+            return !value.starts_with('=') && !value.trim().is_empty();
+        }
+    }
+    let ascii_head = path.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    ascii_head && !path.contains('.') && rest.starts_with('(') && rest.trim_end().ends_with(')')
+}
+
 fn is_control_backslash(s: &str) -> bool {
     s.starts_with("\\-") || s.starts_with("\\e") || s.starts_with("\\![")
 }
@@ -1382,13 +1470,20 @@ pub enum LoadError {
 
 // ── ファイル読み込み ─────────────────────────────────────
 
-pub fn load_program(
+type LoadedProgram =
+    (Vec<Talk>, Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>, Vec<(Vec<PathSegment>, AssignOp, Expr)>);
+
+pub fn load_program(entry: &Path, visited: &mut HashSet<PathBuf>) -> Result<LoadedProgram, LoadError> {
+    load_program_with_warnings(entry, visited, &mut Vec::new())
+}
+
+/// load_programと同じだが、前処理の指摘（PreprocessResult::warnings）を
+/// ファイル名付きでwarningsに積む。構文チェッカーが使う。
+pub fn load_program_with_warnings(
     entry: &Path,
     visited: &mut HashSet<PathBuf>,
-) -> Result<
-    (Vec<Talk>, Vec<(String, Vec<String>, Vec<Spanned<Stmt>>)>, Vec<(Vec<PathSegment>, AssignOp, Expr)>),
-    LoadError
-> {
+    warnings: &mut Vec<Diagnostic>,
+) -> Result<LoadedProgram, LoadError> {
     let canonical = entry.canonicalize().unwrap_or_else(|_| entry.to_path_buf());
     if visited.contains(&canonical) {
         return Ok((vec![], vec![], vec![]));
@@ -1413,6 +1508,7 @@ pub fn load_program(
             return Err(LoadError::ParseError(diags, entry.to_path_buf()));
         }
     };
+    warnings.extend(pre.warnings.iter().map(|d| d.clone().in_file(file_name.as_str())));
     let src: &str = &pre.src;
     append_log!("after preprocess");
 
@@ -1452,7 +1548,7 @@ pub fn load_program(
             ProgramItem::Include(path) => {
                 let child = base_dir.join(&path);
                 append_log!(&format!("include: {:?}" , child));
-                let (mut ct, mut cf, mut cg) = load_program(&child, visited)?;
+                let (mut ct, mut cf, mut cg) = load_program_with_warnings(&child, visited, warnings)?;
                 talks.append(&mut ct);
                 funcs.append(&mut cf);
                 globals.append(&mut cg);
@@ -1607,7 +1703,7 @@ fn resolve_stmt_lines(stmts: &mut [Spanned<Stmt>], src: &str, pre: &PreprocessRe
             Stmt::For { body, .. }
             | Stmt::ForEach { body, .. }
             | Stmt::FuncDef { body, .. } => resolve_stmt_lines(body, src, pre, file),
-            Stmt::While(_, body) => resolve_stmt_lines(body, src, pre, file),
+            Stmt::While(_, body) | Stmt::Script(body) => resolve_stmt_lines(body, src, pre, file),
             Stmt::Match { arms, .. } => {
                 for arm in arms.iter_mut() {
                     resolve_stmt_lines(&mut arm.body, src, pre, file);
@@ -2452,4 +2548,54 @@ fn test_top_level_let_reports_dedicated_error() {
         assert!(msg.contains("let はトークや関数の中でしか使えません"), "{}", msg);
         assert_eq!(errs[0].span().start, 0);
     }
+}
+
+#[test]
+fn test_script_block_ends_dialogue_and_is_parsed() {
+    let src = "OnBoot => {\n    湊: こんにちは\n    @{\n        hoge = 0\n        湊: 中\n        続き\n    }\n    湊: 後\n}";
+    let pre = preprocess(src).expect("preprocess failed");
+    assert!(!pre.src.contains(r"こんにちは\n"), "{}", pre.src);
+    // 中のセリフもマップ扱いにならず、ふだんどおり連結される
+    assert!(pre.src.contains(r"湊: 中\n続き"), "{}", pre.src);
+    let items = program_with_include().parse(&*pre.src).into_result().expect("parse failed");
+    let ProgramItem::Talk(t) = &items[0] else { panic!() };
+    assert!(matches!(&t.body[1].node, Stmt::Script(b) if b.len() == 2), "{:?}", t.body[1].node);
+    assert!(matches!(&t.body[2].node, Stmt::Dialogue(_)));
+}
+
+#[test]
+fn test_script_block_zenkaku_braces_keep_line_map() {
+    let src = "OnBoot => {\n    湊: あ\n    @｛\n        x = 1\n    ｝\n    let y = ｛\"a\": 1｝\n}";
+    let pre = preprocess(src).expect("preprocess failed");
+    assert!(pre.src.contains("@{") && pre.src.contains("    }\n"), "{}", pre.src);
+    // 処理ブロック以外の全角括弧はそのまま
+    assert!(pre.src.contains("｛\"a\": 1｝"), "{}", pre.src);
+    assert_eq!(pre.resolve_line(5), 5);
+}
+
+#[test]
+fn test_script_block_start_detection() {
+    assert!(is_script_block_start("@{"));
+    assert!(is_script_block_start("@{ x = 1 }"));
+    assert!(!is_script_block_start("@ {"));
+    assert!(!is_script_block_start("@湊 {笑}"));
+    assert!(!is_script_block_start("do {"));
+}
+
+#[test]
+fn test_warns_on_code_like_continuation() {
+    let rules = |src: &str| -> Vec<(u32, &'static str)> {
+        preprocess(src).expect("preprocess failed").warnings.iter()
+            .map(|d| (d.line().unwrap(), d.rule.unwrap())).collect()
+    };
+    let src = "OnBoot => {\n    湊: またね\n    save.終了分 = 通算分()\n    hoge_talk()\n    fuga += 1\n}";
+    assert_eq!(rules(src), vec![(3, rule::CODE_IN_DIALOGUE), (4, rule::CODE_IN_DIALOGUE), (5, rule::CODE_IN_DIALOGUE)]);
+    // セリフらしい続き行は対象外
+    let src = "OnBoot => {\n    湊: 今日は\n    えっと(笑)\n    a == b のときは\n    1+1 = 2\n    Hello (world)\n}";
+    assert_eq!(rules(src), vec![]);
+    // セリフに続かない行は従来どおり処理なので対象外
+    assert_eq!(rules("OnBoot => {\n    fuga = 1\n    hoge()\n}"), vec![]);
+    // セリフの続きだった「@{」には移行の注意を出す
+    let src = "OnBoot => {\n    湊: あ\n    @{ x = 1 }\n    @{ y = 1 }\n}";
+    assert_eq!(rules(src), vec![(3, rule::SCRIPT_BLOCK_AFTER_DIALOGUE)]);
 }

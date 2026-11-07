@@ -26,6 +26,7 @@
   - [while](control/while.md)
   - [match](control/match.md)
   - [break / continue / return](control/flow.md)
+  - [処理ブロック @{ }](control/script.md)
 
 - [関数](func/index.md)
   - [func定義と呼び出し](func/funcdef.md)
